@@ -109,11 +109,96 @@ def _plot_fft(freqs: np.ndarray, amp: np.ndarray, title: str = "FFT") -> go.Figu
     fig.update_layout(title=title, margin=dict(l=40, r=20, t=30, b=40), height=420)
     return fig
 
+# --- HEADER pulito (senza riquadro), logo SINISTRA + bottoni piccoli ---
+def render_header():
+    import base64, mimetypes
+    from pathlib import Path
+
+    logo_path = Path("assets/logo.png")  # cambia nome/estensione se necessario
+    logo_tag = ""
+    if logo_path.exists():
+        mime = mimetypes.guess_type(logo_path.name)[0] or "image/png"
+        b64 = base64.b64encode(logo_path.read_bytes()).decode("utf-8")
+        logo_tag = f"<img class='logo' src='data:{mime};base64,{b64}' alt='Logo'>"
+
+    st.markdown(
+        f"""
+        <style>
+          /* Container completamente trasparente */
+          .app-header {{
+            background: transparent;
+            border: none;
+            box-shadow: none;
+            padding: 0;
+            margin: 0 0 10px 0; /* solo un po' di spazio sotto */
+          }}
+          /* Stack a sinistra */
+          .brand {{
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+            gap: 8px;
+          }}
+          .brand .logo {{
+            height: 96px; width: auto; object-fit: contain;
+          }}
+          .brand h1 {{
+            margin: 4px 0 2px 0;
+            font-size: 4rem; line-height: .1; letter-spacing: .2px;
+          }}
+          .brand .subtitle {{
+            margin: 0 0 6px 0; font-size: 1rem;
+          }}
+          .actions {{
+            display: flex; gap: 8px; flex-wrap: wrap;
+          }}
+          .btn {{
+            display: inline-flex; align-items: center; gap: 6px;
+            padding: 6px 10px; border-radius: 9999px; font-size: .85rem;
+            text-decoration: none !important; border: 1px solid #2b2b2b;
+            transition: transform .08s ease, opacity .8s ease, border-color .2s ease, background .2s ease;
+          }}
+          .btn:active {{ transform: translateY(1px); }}
+          .btn-primary {{ background: ##f4c430; color: #111; border-color: #d6a300; }}
+          .btn-primary:hover {{ opacity: .9; }}
+          .btn-ghost {{ background: #141414; color: #e8eaed; border-color: #2b2b2b; }}
+          .btn-ghost:hover {{ border-color: #3a3a3a; }}
+          .emoji {{ font-size: 1rem; }}
+
+          @media (max-width: 760px) {{
+            .brand h1 {{ font-size: 1.35rem; }}
+            .brand .subtitle {{ font-size: .9rem; }}
+          }}
+        </style>
+
+        <div class="app-header">
+          <div class="brand">
+            {logo_tag}
+            <h1>Analizzatore CSV — Web</h1>
+            <p class="subtitle">Lean data analysis — Plot, Filtri, FFT e Report</p>
+            <div class="actions">
+              <a class="btn btn-primary" href="https://buymeacoffee.com/asillav" target="_blank" rel="noopener">
+                <span class="emoji">☕</span> Buy me a coffee
+              </a>
+              <a class="btn btn-ghost" href="https://asillav.github.io/" target="_blank" rel="noopener">
+                <span class="emoji">🐙</span> GitHub
+              </a>
+            </div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
 
 # ---------------------- UI principale ---------------------- #
 def main():
     st.set_page_config(page_title="Analizzatore CSV — Web", layout="wide")
-    st.title("📊 Analizzatore CSV — Web")
+    #st.title("📊 Analizzatore CSV — Web")
+    render_header()
+
+    #st.divider()
+
     st.caption("Upload CSV → seleziona X/Y → limiti assi → Advanced (fs/filtri/FFT) → report")
 
     upload = st.file_uploader("Carica un file CSV", type=["csv"])
