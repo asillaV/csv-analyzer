@@ -124,15 +124,13 @@ def render_header():
     st.markdown(
         f"""
         <style>
-          /* Container completamente trasparente */
           .app-header {{
             background: transparent;
             border: none;
             box-shadow: none;
             padding: 0;
-            margin: 0 0 10px 0; /* solo un po' di spazio sotto */
+            margin: 0 0 10px 0;
           }}
-          /* Stack a sinistra */
           .brand {{
             display: flex;
             flex-direction: column;
@@ -159,8 +157,8 @@ def render_header():
             transition: transform .08s ease, opacity .8s ease, border-color .2s ease, background .2s ease;
           }}
           .btn:active {{ transform: translateY(1px); }}
-          .btn-primary {{ background: ##f4c430; color: #111; border-color: #d6a300; }}
-          .btn-primary:hover {{ opacity: .9; }}
+          .btn-primary {{ background: #f4c430; color: #111; border-color: #d6a300; }}
+          .btn-primary:hover {{ background: #e0b51e; border-color: #c79c14; }}
           .btn-ghost {{ background: #141414; color: #e8eaed; border-color: #2b2b2b; }}
           .btn-ghost:hover {{ border-color: #3a3a3a; }}
           .emoji {{ font-size: 1rem; }}
@@ -194,10 +192,7 @@ def render_header():
 # ---------------------- UI principale ---------------------- #
 def main():
     st.set_page_config(page_title="Analizzatore CSV — Web", layout="wide")
-    #st.title("📊 Analizzatore CSV — Web")
     render_header()
-
-    #st.divider()
 
     st.caption("Upload CSV → seleziona X/Y → limiti assi → Advanced (fs/filtri/FFT) → report")
 
@@ -225,11 +220,11 @@ def main():
 
     cols = meta.get("columns", list(df.columns))
 
-    # --- Controlli (form) ---
+    # --- Controlli (form) --- #
     with st.form("controls"):
         x_col = st.selectbox("Colonna X (opzionale)", options=["—"] + cols, index=0)
         y_cols = st.multiselect("Colonne Y", options=cols)
-        mode = st.radio("Modalità grafico", ["Sovrapposto", "Separati"], horizontal=True, index=0)
+        mode = st.radio("Modalità grafico", ["Sovrapposto", "Separati", "Cascata"], horizontal=True, index=0)
 
         c1, c2 = st.columns(2)
         with c1:
@@ -329,61 +324,194 @@ def main():
     if x_name and x_values is not None:
         xrange = _parse_range_x(x_min_txt, x_max_txt, x_values)
 
-    # ==== PLOT ====
-    if mode == "Separati":
-        tabs = st.tabs(y_cols)
-    else:
-        tabs = None
+    # ========================= PLOT ========================= #
+    if mode == "Sovrapposto":
+        # ----- UNICA FIGURA CON TUTTE LE SERIE ----- #
+        combined = go.Figure()
+        x_label = x_name if x_name else "Index"
 
-    # Loop per serie
-    for idx, yname in enumerate(y_cols):
-        series, x_ser = _make_time_series(df, x_name, yname)
-        host = tabs[idx] if tabs else st
+        for yname in y_cols:
+            series, x_ser = _make_time_series(df, x_name, yname)
+            if series.dropna().empty:
+                st.info(f"'{yname}': nessun dato numerico valido.")
+                continue
 
-        if series.dropna().empty:
-            host.info(f"'{yname}': nessun dato numerico valido.")
-            continue
-
-        # --- FILTRO ---
-        y_filt = None
-        ok, msg = validate_filter_spec(fspec, fs_value)
-        if not ok and fspec.enabled:
-            host.warning(f"Filtro non applicato a {yname}: {msg}")
-            y_plot = series
-        else:
-            if fspec.enabled:
-                try:
-                    y_filt, _used_fs = apply_filter(series, x_ser, fspec, fs_override=fs_value)
-                    y_plot = y_filt
-                except Exception as e:
-                    host.warning(f"Filtro non applicato a {yname}: {e}")
-                    y_plot = series
-            else:
+            # Filtro (se attivo)
+            y_filt = None
+            ok, msg = validate_filter_spec(fspec, fs_value)
+            if fspec.enabled and not ok:
+                st.warning(f"Filtro non applicato a {yname}: {msg}")
                 y_plot = series
-
-        # --- PLOT TEMPO ---
-        fig = _plot_xy(x_ser, y_plot, name=yname + (" (filtrato)" if (fspec.enabled and overlay_orig is False) else ""))
-        if yrange:
-            fig.update_yaxes(range=yrange)
-        if xrange:
-            fig.update_xaxes(range=xrange)
-        if overlay_orig and fspec.enabled and y_filt is not None:
-            # mostro anche originale in overlay
-            fig.add_trace(go.Scatter(x=x_ser if x_ser is not None else None, y=series, mode="lines", name=f"{yname} (originale)", line=dict(width=1, dash="dot")))
-            fig.data = fig.data[::-1]  # metto filtrato sopra
-        host.plotly_chart(fig, use_container_width=True)
-
-        # --- FFT ---
-        if fftspec.enabled:
-            y_fft = y_filt if (fspec.enabled and y_filt is not None and st.session_state.get("fft_use_filtered", True)) else (y_filt if (fspec.enabled and fft_use == "Filtrato (se attivo)") else series)  # robustezza
-            if not fs_value or fs_value <= 0:
-                host.warning(f"FFT non calcolata per {yname}: fs non disponibile.")
             else:
-                freqs, amp = compute_fft(y_fft if (fspec.enabled and fft_use == "Filtrato (se attivo)" and y_filt is not None) else series, fs_value, detrend=fftspec.detrend)
-                if freqs.size == 0:
-                    host.info(f"FFT non calcolabile per {yname} (serie troppo corta o parametri non validi).")
+                if fspec.enabled:
+                    try:
+                        y_filt, _ = apply_filter(series, x_ser, fspec, fs_override=fs_value)
+                        y_plot = y_filt
+                    except Exception as e:
+                        st.warning(f"Filtro non applicato a {yname}: {e}")
+                        y_plot = series
                 else:
-                    host.plotly_chart(_plot_fft(freqs, amp, title=f"FFT — {yname}"), use_container_width=True)
+                    y_plot = series
+
+            # Originale tratteggiato se richiesto
+            if overlay_orig and fspec.enabled and y_filt is not None:
+                combined.add_trace(
+                    go.Scatter(
+                        x=(x_ser if x_ser is not None else None),
+                        y=series,
+                        mode="lines",
+                        name=f"{yname} (originale)",
+                        line=dict(width=1, dash="dot")
+                    )
+                )
+
+            # Traccia principale (filtrato o originale)
+            name_main = yname + (" (filtrato)" if (fspec.enabled and not overlay_orig) else "")
+            combined.add_trace(
+                go.Scatter(
+                    x=(x_ser if x_ser is not None else None),
+                    y=y_plot,
+                    mode="lines",
+                    name=name_main
+                )
+            )
+
+        combined.update_layout(
+            title="Confronto sovrapposto",
+            xaxis_title=x_label,
+            yaxis_title="Valore",
+            template="plotly_white",
+            legend_title="Serie",
+            margin=dict(l=50, r=30, t=60, b=50),
+        )
+        if yrange:
+            combined.update_yaxes(range=yrange)
+        if xrange:
+            combined.update_xaxes(range=xrange)
+
+        st.plotly_chart(combined, use_container_width=True)
+
+        # FFT: una per serie, sotto
+        if fftspec.enabled:
+            for yname in y_cols:
+                series, x_ser = _make_time_series(df, x_name, yname)
+                if series.dropna().empty:
+                    continue
+                y_filt = None
+                if fspec.enabled:
+                    try:
+                        y_filt, _ = apply_filter(series, x_ser, fspec, fs_override=fs_value)
+                    except Exception:
+                        y_filt = None
+                y_fft = y_filt if (fspec.enabled and y_filt is not None and fft_use == "Filtrato (se attivo)") else series
+                if not fs_value or fs_value <= 0:
+                    st.warning(f"FFT non calcolata per {yname}: fs non disponibile.")
+                else:
+                    freqs, amp = compute_fft(y_fft, fs_value, detrend=fftspec.detrend)
+                    if freqs.size == 0:
+                        st.info(f"FFT non calcolabile per {yname} (serie troppo corta o parametri non validi).")
+                    else:
+                        st.plotly_chart(_plot_fft(freqs, amp, title=f"FFT — {yname}"), use_container_width=True)
+
+    elif mode == "Separati":
+        # ----- UNA TAB PER SERIE ----- #
+        tabs = st.tabs(y_cols)
+        for idx, yname in enumerate(y_cols):
+            series, x_ser = _make_time_series(df, x_name, yname)
+            host = tabs[idx]
+
+            if series.dropna().empty:
+                host.info(f"'{yname}': nessun dato numerico valido.")
+                continue
+
+            # Filtro
+            y_filt = None
+            ok, msg = validate_filter_spec(fspec, fs_value)
+            if fspec.enabled and not ok:
+                host.warning(f"Filtro non applicato a {yname}: {msg}")
+                y_plot = series
+            else:
+                if fspec.enabled:
+                    try:
+                        y_filt, _ = apply_filter(series, x_ser, fspec, fs_override=fs_value)
+                        y_plot = y_filt
+                    except Exception as e:
+                        host.warning(f"Filtro non applicato a {yname}: {e}")
+                        y_plot = series
+                else:
+                    y_plot = series
+
+            fig = _plot_xy(x_ser, y_plot, name=yname + (" (filtrato)" if (fspec.enabled and not overlay_orig) else ""))
+            if yrange:
+                fig.update_yaxes(range=yrange)
+            if xrange:
+                fig.update_xaxes(range=xrange)
+            if overlay_orig and fspec.enabled and y_filt is not None:
+                fig.add_trace(go.Scatter(x=x_ser if x_ser is not None else None, y=series, mode="lines",
+                                         name=f"{yname} (originale)", line=dict(width=1, dash="dot")))
+                fig.data = fig.data[::-1]
+            host.plotly_chart(fig, use_container_width=True)
+
+            # FFT per singola serie
+            if fftspec.enabled:
+                y_fft = y_filt if (fspec.enabled and y_filt is not None and fft_use == "Filtrato (se attivo)") else series
+                if not fs_value or fs_value <= 0:
+                    host.warning(f"FFT non calcolata per {yname}: fs non disponibile.")
+                else:
+                    freqs, amp = compute_fft(y_fft, fs_value, detrend=fftspec.detrend)
+                    if freqs.size == 0:
+                        host.info(f"FFT non calcolabile per {yname} (serie troppo corta o parametri non validi).")
+                    else:
+                        host.plotly_chart(_plot_fft(freqs, amp, title=f"FFT — {yname}"), use_container_width=True)
+
+    else:
+        # ----- CASCATA: grafici uno sotto l’altro ----- #
+        for yname in y_cols:
+            series, x_ser = _make_time_series(df, x_name, yname)
+
+            if series.dropna().empty:
+                st.info(f"'{yname}': nessun dato numerico valido.")
+                continue
+
+            # Filtro
+            y_filt = None
+            ok, msg = validate_filter_spec(fspec, fs_value)
+            if fspec.enabled and not ok:
+                st.warning(f"Filtro non applicato a {yname}: {msg}")
+                y_plot = series
+            else:
+                if fspec.enabled:
+                    try:
+                        y_filt, _ = apply_filter(series, x_ser, fspec, fs_override=fs_value)
+                        y_plot = y_filt
+                    except Exception as e:
+                        st.warning(f"Filtro non applicato a {yname}: {e}")
+                        y_plot = series
+                else:
+                    y_plot = series
+
+            fig = _plot_xy(x_ser, y_plot, name=yname + (" (filtrato)" if (fspec.enabled and not overlay_orig) else ""))
+            if yrange:
+                fig.update_yaxes(range=yrange)
+            if xrange:
+                fig.update_xaxes(range=xrange)
+            if overlay_orig and fspec.enabled and y_filt is not None:
+                fig.add_trace(go.Scatter(x=x_ser if x_ser is not None else None, y=series, mode="lines",
+                                         name=f"{yname} (originale)", line=dict(width=1, dash="dot")))
+                fig.data = fig.data[::-1]
+            st.plotly_chart(fig, use_container_width=True)
+
+            # FFT sotto ogni grafico (se attiva)
+            if fftspec.enabled:
+                y_fft = y_filt if (fspec.enabled and y_filt is not None and fft_use == "Filtrato (se attivo)") else series
+                if not fs_value or fs_value <= 0:
+                    st.warning(f"FFT non calcolata per {yname}: fs non disponibile.")
+                else:
+                    freqs, amp = compute_fft(y_fft, fs_value, detrend=fftspec.detrend)
+                    if freqs.size == 0:
+                        st.info(f"FFT non calcolabile per {yname} (serie troppo corta o parametri non validi).")
+                    else:
+                        st.plotly_chart(_plot_fft(freqs, amp, title=f"FFT — {yname}"), use_container_width=True)
 
     # ---- Report ----
     st.divider()
