@@ -1,0 +1,34 @@
+# ===== Python build =====
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# ===== Virtual environments =====
+.venv/
+env/
+venv/
+*.egg-info/
+
+# ===== Logs & temporary files =====
+logs/
+outputs/
+tmp_*.csv
+*.log
+*.tmp
+*.bak
+*.old
+
+# ===== VSCode & system =====
+.vscode/
+*.lnk
+*.ini
+Thumbs.db
+desktop.ini
+
+# ===== Streamlit cache =====
+.streamlit/
+.cache/
+
+# ===== Misc =====
+.DS_Store
