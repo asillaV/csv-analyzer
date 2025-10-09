@@ -45,6 +45,46 @@ class VisualReportManager:
 
     # ------------------------------------------------------------------
     @staticmethod
+    def _ensure_kaleido_available() -> None:
+        """Garantisce che il backend Kaleido sia importabile.
+
+        In ambienti come Streamlit Cloud l'installazione dichiarata nei
+        requirements potrebbe non essere già attiva al primo avvio: in quel
+        caso viene tentata un'installazione automatica tramite ``pip``.
+        """
+
+        import importlib.util
+        import subprocess
+        import sys
+
+        if importlib.util.find_spec("kaleido") is not None:
+            return
+
+        log.warning("Pacchetto 'kaleido' non trovato, tentativo di installazione runtime…")
+        try:
+            result = subprocess.run(
+                [sys.executable, "-m", "pip", "install", "kaleido>=0.2.1", "--quiet"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            if result.stdout:
+                log.debug("pip install kaleido stdout: %s", result.stdout.strip())
+            if result.stderr:
+                log.debug("pip install kaleido stderr: %s", result.stderr.strip())
+        except Exception as exc:  # pragma: no cover - dipende dall'ambiente runtime
+            raise RuntimeError(
+                "Installazione automatica di 'kaleido' fallita. Verificare la connessione "
+                "di rete o installare manualmente la dipendenza."
+            ) from exc
+
+        if importlib.util.find_spec("kaleido") is None:
+            raise RuntimeError(
+                "Il pacchetto 'kaleido' non risulta disponibile dopo l'installazione automatica."
+            )
+
+    # ------------------------------------------------------------------
+    @staticmethod
     def _prepare_xy(
         df: pd.DataFrame,
         y_column: str,
@@ -178,11 +218,14 @@ class VisualReportManager:
         width = 1280
         height = height_per_plot * len(spec_list)
 
+        self._ensure_kaleido_available()
+
         try:
             image_bytes = fig.to_image(format=fmt, width=width, height=height, scale=scale)
         except Exception as exc:
             raise RuntimeError(
-                "Impossibile esportare il report visivo. Assicurarsi che il pacchetto 'kaleido' sia installato."
+                "Impossibile esportare il report visivo. Verificare l'installazione di 'kaleido' e "
+                "che l'ambiente supporti la generazione di immagini statiche."
             ) from exc
 
         output_path.write_bytes(image_bytes)
