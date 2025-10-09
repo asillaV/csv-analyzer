@@ -95,16 +95,59 @@ class VisualReportManager:
         except Exception:  # pragma: no cover - dipende da runtime esterni
             return
 
+        extra_args = ("--disable-gpu", "--no-sandbox")
+
+        def _merge_args(raw_value):
+            current = tuple(raw_value or ())
+            merged = tuple(dict.fromkeys(current + extra_args))
+            if merged == current:
+                return None
+            if isinstance(raw_value, list):
+                return list(merged)
+            return merged
+
+        defaults = getattr(pio, "defaults", None)
+        for candidate in (
+            getattr(getattr(defaults, "to_image", None), "kaleido", None),
+            getattr(defaults, "kaleido", None),
+            defaults,
+        ):
+            if candidate is None:
+                continue
+            try:
+                current_args = getattr(candidate, "chromium_args")
+            except AttributeError:
+                continue
+
+            merged_args = _merge_args(current_args)
+            if merged_args is not None:
+                try:
+                    setattr(candidate, "chromium_args", merged_args)
+                    return
+                except AttributeError:
+                    # Alcuni wrapper possono impedire l'assegnazione diretta
+                    log.debug("Impossibile aggiornare chromium_args sul namespace defaults Kaleido.")
+                    break
+
         kaleido_module = getattr(pio, "kaleido", None)
         scope = getattr(kaleido_module, "scope", None)
         if scope is None:
             return
 
-        chromium_args = tuple(scope.chromium_args or ())
-        extra_args = ("--disable-gpu", "--no-sandbox")
-        desired = tuple(dict.fromkeys(chromium_args + extra_args))
-        if desired != chromium_args:
-            scope.chromium_args = desired
+        try:
+            current_args = getattr(scope, "chromium_args")
+        except AttributeError:
+            log.debug(
+                "Kaleido scope non espone chromium_args; salto configurazione sandbox (Plotly >= 6?)."
+            )
+            return
+
+        merged_args = _merge_args(current_args)
+        if merged_args is not None:
+            try:
+                setattr(scope, "chromium_args", merged_args)
+            except AttributeError:
+                log.debug("Impossibile impostare chromium_args su Kaleido scope; ignorato.")
 
     # ------------------------------------------------------------------
     @staticmethod
