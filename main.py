@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 from core.logger import LogManager
+from ui.main_app import CSVAnalyzerApp
+
 
 def main() -> None:
-    logger = LogManager("analizzatore.main").get_logger()
+    """Avvia l'interfaccia TUI basata su Textual."""
+    logger = LogManager("analizzatore.tui").get_logger()
     try:
-        from ui.desktop_app import DesktopAppTk
-        app = DesktopAppTk()
-        app.mainloop()
-    except Exception as e:
-        logger.error("Errore critico in main: %s", e, exc_info=True)
-        print(f"[ERRORE] {e}")
+        CSVAnalyzerApp().run()
+    except Exception as exc:
+        logger.error("Errore critico nella TUI: %s", exc, exc_info=True)
+        raise
+
 
 if __name__ == "__main__":
     main()
