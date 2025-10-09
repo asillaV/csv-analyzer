@@ -31,16 +31,16 @@
 
 | Interfaccia | Descrizione | Avvio |
 |-------------|-------------|-------|
-| **Web (Streamlit)** | UI moderna con pannello *Advanced* per filtri, FFT e override di fs. | `streamlit run web_app.py` *(oppure esegui `Start(Web_app).bat` su Windows).* |
-| **Desktop (Tkinter)** | Interfaccia classica con slice X, modalità di plot separati/sovrapposti e overlay del segnale originale. | `python desktop_app_tk.py` *(crea il file se non presente usando la versione fornita).* |
-| **TUI (Textual)** | Interfaccia a terminale con selezione Y via checkbox e preview dei grafici HTML. | `python main.py` |
+| **Web (Streamlit)** | UI moderna con pannello *Advanced* per filtri, FFT, override di fs e generazione del report visivo. | `streamlit run web_app.py` |
+| **Desktop (Tkinter)** | Interfaccia classica con slice X, modalità di plot separati/sovrapposti e overlay del segnale originale. | `python desktop_app_tk.py` |
+| **TUI (Textual)** | Interfaccia a terminale (Textual) con selezione Y via checkbox e preview dei grafici HTML. | `python main.py` |
 
 ---
 
 ## Requisiti
 - **Python 3.10+**
 - Dipendenze Python elencate in [`requirements.txt`](requirements.txt)
-- **SciPy** (opzionale) per abilitare il filtro Butterworth: `python -m pip install scipy`
+- **SciPy** (inclusa in `requirements.txt`) abilita i filtri Butterworth; se vuoi un setup minimale puoi rimuoverla ed installarla successivamente con `python -m pip install scipy`
 
 Se SciPy non è installato, il filtro Butterworth viene disabilitato automaticamente; MA e FFT restano operativi.
 
@@ -61,7 +61,7 @@ source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 
-# 4) (opzionale) Abilita il filtro Butterworth
+# 4) (opzionale) Installazione manuale di SciPy se l'hai rimossa dai requisiti
 python -m pip install scipy
 ```
 
@@ -93,6 +93,7 @@ Durante l'uso:
 ## Output generati
 - **Grafici**: HTML Plotly salvati in `outputs/` e aperti automaticamente nel browser.
 - **Report**: esportazioni CSV/Markdown/HTML gestite da `ReportManager`.
+- **Report visivi**: immagini PNG/PDF generate da `VisualReportManager` e salvate in `outputs/visual_reports/`.
 - **Log**: file `logs/analizzatore_YYYYMMDD.log` con messaggi di validazione, warning ed errori.
 
 ---
@@ -104,15 +105,17 @@ core/
   loader.py          -> Carica i DataFrame in base ai metadati
   signal_tools.py    -> FilterSpec, FFTSpec, resolve_fs, validate_filter_spec,
                          apply_filter (MA/Butterworth), compute_fft
+  visual_report_manager.py -> Generazione report visivi Plotly (PNG/PDF)
   report_manager.py  -> Statistiche descrittive + export CSV/MD/HTML
   logger.py          -> Logging centralizzato
 
 ui/
   main_app.py        -> UI Textual (checkbox Y, fs avanzato, plot HTML)
+  desktop_app.py     -> UI Tkinter (slice X, overlay, modalità plot)
 
-web_app.py           -> UI Streamlit (pannello Advanced)
-desktop_app_tk.py    -> UI Tkinter (slice X, overlay, modalità plot)
-main.py              -> Entrypoint TUI
+web_app.py           -> UI Streamlit (pannello Advanced + report visivo)
+desktop_app_tk.py    -> Entrypoint desktop Tkinter
+main.py              -> Entrypoint TUI (Textual)
 requirements.txt
 README.md
 ```
