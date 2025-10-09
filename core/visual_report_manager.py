@@ -151,6 +151,33 @@ class VisualReportManager:
 
     # ------------------------------------------------------------------
     @staticmethod
+    def _describe_kaleido_failure(error: Exception | str) -> str:
+        """Genera un messaggio user-friendly per gli errori Kaleido."""
+
+        message = str(error).strip()
+        if not message:
+            return (
+                "Esportazione Kaleido non riuscita per un motivo sconosciuto. "
+                "Utilizzare il formato HTML come alternativa."
+            )
+
+        lowered = message.lower()
+        if "requires google chrome" in lowered or "chromium" in lowered:
+            return (
+                "Kaleido richiede Google Chrome/Chromium preinstallato. "
+                "In ambienti gestiti (es. Streamlit Cloud) non è possibile installarlo: "
+                "utilizzare il download HTML oppure eseguire l'app in locale con un browser disponibile."
+            )
+        if "kaleido" in lowered and "install" in lowered:
+            return (
+                "La dipendenza Kaleido non è disponibile. "
+                "Verificare l'installazione (pip install kaleido) oppure usare l'esportazione HTML."
+            )
+
+        return message
+
+    # ------------------------------------------------------------------
+    @staticmethod
     def _prepare_xy(
         df: pd.DataFrame,
         y_column: str,
@@ -305,10 +332,12 @@ class VisualReportManager:
                     final_fmt = fmt
                 except Exception as exc:  # pragma: no cover - dipende da ambiente kaleido
                     log.warning("Esportazione Kaleido fallita, uso fallback HTML: %s", exc, exc_info=True)
-                    fallback_reason = str(exc)
+                    fallback_reason = self._describe_kaleido_failure(exc)
                     kaleido_available = False
             else:
-                fallback_reason = "Kaleido non disponibile nell'ambiente runtime."
+                fallback_reason = self._describe_kaleido_failure(
+                    "Kaleido non disponibile nell'ambiente runtime."
+                )
 
             if fmt != "html" and not kaleido_available:
                 export_bytes = fig.to_html(full_html=True, include_plotlyjs="cdn").encode("utf-8")
