@@ -91,6 +91,8 @@ class VisualReportManager:
         template: str,
         height_per_plot: int,
         show_legend: bool,
+        x_range: Optional[Sequence] = None,
+        y_range: Optional[Sequence[float]] = None,
     ) -> go.Figure:
         rows = len(specs)
         subplot_titles = [spec.title or spec.y_column for spec in specs]
@@ -105,8 +107,12 @@ class VisualReportManager:
                 col=1,
             )
             fig.update_yaxes(title_text=spec.y_label or spec.y_column, row=idx, col=1)
+            if y_range is not None:
+                fig.update_yaxes(range=list(y_range), row=idx, col=1)
             default_x_label = x_column if x_column else "Index"
             fig.update_xaxes(title_text=spec.x_label or default_x_label, row=idx, col=1)
+            if x_range is not None:
+                fig.update_xaxes(range=list(x_range), row=idx, col=1)
 
         height = max(1, rows) * height_per_plot
         fig.update_layout(
@@ -133,6 +139,8 @@ class VisualReportManager:
         template: str = "plotly_white",
         show_legend: bool = False,
         scale: float = 2.0,
+        x_range: Optional[Sequence] = None,
+        y_range: Optional[Sequence[float]] = None,
     ) -> dict:
         """Genera il report visivo e lo salva come PNG o PDF.
 
@@ -157,6 +165,8 @@ class VisualReportManager:
             template=template,
             height_per_plot=height_per_plot,
             show_legend=show_legend,
+            x_range=x_range,
+            y_range=y_range,
         )
 
         base = base_name.strip() if base_name else ""

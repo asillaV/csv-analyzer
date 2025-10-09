@@ -63,10 +63,12 @@ def _button(label: str, **kwargs: Any) -> Any:
 
 def _image(data: Any, **kwargs: Any) -> Any:
     opts: dict[str, Any] = {}
-    if _supports_kwarg(st.image, "use_column_width"):
-        opts["use_column_width"] = True
-    elif _supports_kwarg(st.image, "width"):
+    if _supports_kwarg(st.image, "width"):
         opts["width"] = "stretch"
+    elif _supports_kwarg(st.image, "use_container_width"):
+        opts["use_container_width"] = True
+    elif _supports_kwarg(st.image, "use_column_width"):
+        opts["use_column_width"] = True
     opts.update(kwargs)
     return st.image(data, **opts)
 
@@ -760,6 +762,8 @@ def main():
                         base_name=visual_base or None,
                         file_format=visual_format,
                         show_legend=visual_show_legend,
+                        x_range=xrange,
+                        y_range=yrange,
                     )
                 st.session_state["_generated_visual_report"] = result
                 st.session_state.pop("_generated_visual_report_error", None)
