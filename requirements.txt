@@ -1,3 +1,4 @@
+# === Core scientific libraries ===
 pandas>=2.2
 numpy>=1.26
 plotly[kaleido]>=5.22
