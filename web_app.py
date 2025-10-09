@@ -207,6 +207,7 @@ def _reset_generated_reports_marker(current_file: Optional[Any]) -> None:
         st.session_state.pop("_generated_visual_report_error", None)
         st.session_state.pop("_visual_report_prev_selection", None)
         st.session_state.pop("_visual_report_last_default_x_label", None)
+        st.session_state.pop("_plots_ready", None)
         for key in list(st.session_state.keys()):
             if isinstance(key, str) and key.startswith("vis_report_"):
                 st.session_state.pop(key, None)
@@ -255,8 +256,10 @@ def main():
 
     # Analisi CSV (encoding/delimiter/header/columns)
     with st.spinner("Analisi CSV..."):
+        upload_bytes = upload.getvalue()
         with open(Path("tmp_upload.csv"), "wb") as f:
-            f.write(upload.read())
+            f.write(upload_bytes)
+        upload.seek(0)
         meta = analyze_csv("tmp_upload.csv")
         df = load_csv(
             "tmp_upload.csv",
@@ -320,7 +323,11 @@ def main():
 
         submitted = st.form_submit_button("Applica / Plot")
 
-    if not submitted:
+    if submitted:
+        st.session_state["_plots_ready"] = True
+
+    if not st.session_state.get("_plots_ready"):
+        st.info("Compila il form e premi 'Applica / Plot' per visualizzare grafici e report.")
         return
 
     if not y_cols:
@@ -623,13 +630,18 @@ def main():
     st.subheader("Report visivo dei grafici")
     st.caption("Scegli fino a 4 serie per creare un'immagine o un PDF con i grafici in cascata.")
 
-    visual_selection = st.multiselect(
+    visual_default = y_cols[: min(4, len(y_cols))] if y_cols else cols[: min(4, len(cols))]
+    visual_raw_selection = st.multiselect(
         "Serie da includere (max 4)",
-        options=y_cols,
-        default=y_cols[: min(4, len(y_cols))],
-        max_selections=4,
+        options=cols,
+        default=visual_default,
         help="Le serie devono essere numeriche; eventuali NaN verranno ignorati.",
     )
+
+    if len(visual_raw_selection) > 4:
+        st.warning("Puoi selezionare al massimo 4 serie: verranno considerate solo le prime quattro.")
+
+    visual_selection = visual_raw_selection[:4]
 
     default_x_label = x_name if x_name else "Index"
     prev_default = st.session_state.get("_visual_report_last_default_x_label")
