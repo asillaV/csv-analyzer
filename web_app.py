@@ -11,6 +11,7 @@ import streamlit as st
 from core.analyzer import analyze_csv
 from core.loader import load_csv
 from core.report_manager import ReportManager
+from core.visual_report_manager import VisualPlotSpec, VisualReportManager
 from core.signal_tools import (
     FilterSpec,
     FFTSpec,
@@ -528,6 +529,87 @@ def main():
                 st.json({k: str(v) if v else None for k, v in out.items()})
             except Exception as e:
                 st.error(f"Generazione report fallita: {e}")
+
+    st.divider()
+    st.subheader("Report visivo dei grafici")
+    st.caption("Scegli fino a 4 serie per creare un'immagine o un PDF con i grafici in cascata.")
+
+    visual_selection = st.multiselect(
+        "Serie da includere (max 4)",
+        options=y_cols,
+        default=y_cols[: min(4, len(y_cols))],
+        max_selections=4,
+        help="Le serie devono essere numeriche; eventuali NaN verranno ignorati.",
+    )
+
+    visual_specs: List[VisualPlotSpec] = []
+    default_x_label = x_name if x_name else "Index"
+    for idx, yname in enumerate(visual_selection):
+        with st.expander(f"Grafico {idx + 1} — {yname}", expanded=False):
+            plot_title = st.text_input(
+                "Titolo grafico",
+                value=yname,
+                key=f"vis_report_title_{idx}_{yname}",
+            )
+            x_label = st.text_input(
+                "Titolo asse X",
+                value=default_x_label,
+                key=f"vis_report_xlabel_{idx}_{yname}",
+            )
+            y_label = st.text_input(
+                "Titolo asse Y",
+                value=yname,
+                key=f"vis_report_ylabel_{idx}_{yname}",
+            )
+        visual_specs.append(
+            VisualPlotSpec(
+                y_column=yname,
+                title=plot_title or None,
+                x_label=x_label or None,
+                y_label=y_label or None,
+            )
+        )
+
+    col_vis1, col_vis2 = st.columns([2, 1])
+    with col_vis1:
+        visual_title = st.text_input("Titolo report visivo", key="vis_report_main_title")
+        visual_base = st.text_input("Nome file (opzionale)", placeholder="es. report_visivo", key="vis_report_base")
+    with col_vis2:
+        visual_format = st.radio("Formato", ["png", "pdf"], horizontal=True, key="vis_report_format")
+        visual_show_legend = st.checkbox("Mostra legenda", value=False, key="vis_report_legend")
+
+    btn_col1, btn_col2, btn_col3 = st.columns([1, 1, 2])
+    with btn_col2:
+        generate_visual = st.button("Genera report visivo", use_container_width=True)
+
+    if generate_visual:
+        if not visual_specs:
+            st.warning("Seleziona almeno una serie per il report visivo.")
+        else:
+            try:
+                with st.spinner("Generazione report visivo..."):
+                    manager = VisualReportManager()
+                    result = manager.generate_report(
+                        df=df,
+                        specs=visual_specs,
+                        x_column=x_name,
+                        title=visual_title or None,
+                        base_name=visual_base or None,
+                        file_format=visual_format,
+                        show_legend=visual_show_legend,
+                    )
+                st.success(f"Report visivo salvato in {result['path']}")
+                mime = "application/pdf" if result["format"] == "pdf" else "image/png"
+                st.download_button(
+                    "Scarica report",
+                    data=result["bytes"],
+                    file_name=result["path"].name,
+                    mime=mime,
+                )
+                if result["format"] == "png":
+                    st.image(result["bytes"], caption="Anteprima report visivo", use_column_width=True)
+            except Exception as e:
+                st.error(f"Generazione report visivo fallita: {e}")
 
     st.divider()
     with st.expander("ℹ️ Info rilevate (clicca per espandere)", expanded=False):
