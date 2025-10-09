@@ -32,3 +32,26 @@ desktop.ini
 
 # ===== Misc =====
 .DS_Store
+
+# ===== Local dev stuff (PC aziendale) =====
+activate_git.ps1
+.vscode/
+*.bat
+*.ps1
+*.cmd
+*.lnk
+*.tmp
+*.log
+*.cache
+*.bak
+Thumbs.db
+desktop.ini
+
+# ===== System & OneDrive sync noise =====
+~$*
+*.tmp
+*.lock
+*.tmp.*
+*.partial
+*.onecache
+*.gitattributes
