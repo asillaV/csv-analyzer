@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, List, Optional, Tuple
+from typing import Any, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -205,6 +205,40 @@ def _reset_generated_reports_marker(current_file: Optional[Any]) -> None:
         st.session_state.pop("_generated_report_error", None)
         st.session_state.pop("_generated_visual_report", None)
         st.session_state.pop("_generated_visual_report_error", None)
+        st.session_state.pop("_visual_report_prev_selection", None)
+        st.session_state.pop("_visual_report_last_default_x_label", None)
+        for key in list(st.session_state.keys()):
+            if isinstance(key, str) and key.startswith("vis_report_"):
+                st.session_state.pop(key, None)
+
+
+def _visual_spec_key(field: str, column: str) -> str:
+    return f"vis_report_{field}::{column}"
+
+
+def _sync_visual_spec_state(selection: Sequence[str], default_x_label: str) -> None:
+    """Ensure per-column widget keys exist and purge deselected ones."""
+
+    prev = st.session_state.get("_visual_report_prev_selection", [])
+    removed = set(prev) - set(selection)
+    for col in removed:
+        for field in ("title", "xlabel", "ylabel"):
+            st.session_state.pop(_visual_spec_key(field, col), None)
+
+    st.session_state["_visual_report_prev_selection"] = list(selection)
+
+    for col in selection:
+        title_key = _visual_spec_key("title", col)
+        if title_key not in st.session_state:
+            st.session_state[title_key] = col
+
+        xlabel_key = _visual_spec_key("xlabel", col)
+        if xlabel_key not in st.session_state:
+            st.session_state[xlabel_key] = default_x_label
+
+        ylabel_key = _visual_spec_key("ylabel", col)
+        if ylabel_key not in st.session_state:
+            st.session_state[ylabel_key] = col
 
 
 def main():
@@ -541,10 +575,27 @@ def main():
     with col_r2:
         if st.button("Genera report"):
             try:
-                out = ReportManager().generate_report(
+                manager = ReportManager()
+                out_paths = manager.generate_report(
                     df, x_name, y_cols, formats=fmt, base_name=base_name or None
                 )
-                st.session_state["_generated_report"] = out
+                mime_map = {
+                    "csv": "text/csv",
+                    "md": "text/markdown",
+                    "html": "text/html",
+                }
+                downloads = {}
+                for fmt_name, path in out_paths.items():
+                    if path and path.exists():
+                        downloads[fmt_name] = {
+                            "path": path,
+                            "bytes": path.read_bytes(),
+                            "mime": mime_map.get(fmt_name, "application/octet-stream"),
+                        }
+                st.session_state["_generated_report"] = {
+                    "outputs": out_paths,
+                    "downloads": downloads,
+                }
                 st.session_state.pop("_generated_report_error", None)
             except Exception as e:
                 st.session_state.pop("_generated_report", None)
@@ -556,7 +607,17 @@ def main():
     generated_report = st.session_state.get("_generated_report")
     if generated_report:
         st.success("Report generato.")
-        st.json({k: str(v) if v else None for k, v in generated_report.items()})
+        outputs = generated_report.get("outputs", {})
+        st.json({k: str(v) if v else None for k, v in outputs.items()})
+        downloads = generated_report.get("downloads", {})
+        for fmt_name, info in downloads.items():
+            st.download_button(
+                f"Scarica {fmt_name.upper()}",
+                data=info["bytes"],
+                file_name=info["path"].name,
+                mime=info["mime"],
+                key=f"download_report_{fmt_name}",
+            )
 
     st.divider()
     st.subheader("Report visivo dei grafici")
@@ -570,25 +631,29 @@ def main():
         help="Le serie devono essere numeriche; eventuali NaN verranno ignorati.",
     )
 
-    visual_specs: List[VisualPlotSpec] = []
     default_x_label = x_name if x_name else "Index"
+    prev_default = st.session_state.get("_visual_report_last_default_x_label")
+    _sync_visual_spec_state(visual_selection, default_x_label)
+    if prev_default is not None and prev_default != default_x_label:
+        for col in visual_selection:
+            key = _visual_spec_key("xlabel", col)
+            if st.session_state.get(key) == prev_default:
+                st.session_state[key] = default_x_label
+    st.session_state["_visual_report_last_default_x_label"] = default_x_label
+
+    visual_specs: List[VisualPlotSpec] = []
     for idx, yname in enumerate(visual_selection):
-        with st.expander(f"Grafico {idx + 1} — {yname}", expanded=False):
-            plot_title = st.text_input(
-                "Titolo grafico",
-                value=yname,
-                key=f"vis_report_title_{idx}_{yname}",
-            )
-            x_label = st.text_input(
-                "Titolo asse X",
-                value=default_x_label,
-                key=f"vis_report_xlabel_{idx}_{yname}",
-            )
-            y_label = st.text_input(
-                "Titolo asse Y",
-                value=yname,
-                key=f"vis_report_ylabel_{idx}_{yname}",
-            )
+        title_key = _visual_spec_key("title", yname)
+        xlabel_key = _visual_spec_key("xlabel", yname)
+        ylabel_key = _visual_spec_key("ylabel", yname)
+        with st.expander(
+            f"Grafico {idx + 1} — {yname}",
+            expanded=False,
+            key=f"vis_report_expander::{yname}",
+        ):
+            plot_title = st.text_input("Titolo grafico", key=title_key)
+            x_label = st.text_input("Titolo asse X", key=xlabel_key)
+            y_label = st.text_input("Titolo asse Y", key=ylabel_key)
         visual_specs.append(
             VisualPlotSpec(
                 y_column=yname,
@@ -644,90 +709,10 @@ def main():
             data=visual_result["bytes"],
             file_name=visual_result["path"].name,
             mime=mime,
+            key="download_visual_report",
         )
         if visual_result["format"] == "png":
             st.image(visual_result["bytes"], caption="Anteprima report visivo", use_column_width=True)
-
-    st.divider()
-    st.subheader("Report visivo dei grafici")
-    st.caption("Scegli fino a 4 serie per creare un'immagine o un PDF con i grafici in cascata.")
-
-    visual_selection = st.multiselect(
-        "Serie da includere (max 4)",
-        options=y_cols,
-        default=y_cols[: min(4, len(y_cols))],
-        max_selections=4,
-        help="Le serie devono essere numeriche; eventuali NaN verranno ignorati.",
-    )
-
-    visual_specs: List[VisualPlotSpec] = []
-    default_x_label = x_name if x_name else "Index"
-    for idx, yname in enumerate(visual_selection):
-        with st.expander(f"Grafico {idx + 1} — {yname}", expanded=False):
-            plot_title = st.text_input(
-                "Titolo grafico",
-                value=yname,
-                key=f"vis_report_title_{idx}_{yname}",
-            )
-            x_label = st.text_input(
-                "Titolo asse X",
-                value=default_x_label,
-                key=f"vis_report_xlabel_{idx}_{yname}",
-            )
-            y_label = st.text_input(
-                "Titolo asse Y",
-                value=yname,
-                key=f"vis_report_ylabel_{idx}_{yname}",
-            )
-        visual_specs.append(
-            VisualPlotSpec(
-                y_column=yname,
-                title=plot_title or None,
-                x_label=x_label or None,
-                y_label=y_label or None,
-            )
-        )
-
-    col_vis1, col_vis2 = st.columns([2, 1])
-    with col_vis1:
-        visual_title = st.text_input("Titolo report visivo", key="vis_report_main_title")
-        visual_base = st.text_input("Nome file (opzionale)", placeholder="es. report_visivo", key="vis_report_base")
-    with col_vis2:
-        visual_format = st.radio("Formato", ["png", "pdf"], horizontal=True, key="vis_report_format")
-        visual_show_legend = st.checkbox("Mostra legenda", value=False, key="vis_report_legend")
-
-    btn_col1, btn_col2, btn_col3 = st.columns([1, 1, 2])
-    with btn_col2:
-        generate_visual = st.button("Genera report visivo", use_container_width=True)
-
-    if generate_visual:
-        if not visual_specs:
-            st.warning("Seleziona almeno una serie per il report visivo.")
-        else:
-            try:
-                with st.spinner("Generazione report visivo..."):
-                    manager = VisualReportManager()
-                    result = manager.generate_report(
-                        df=df,
-                        specs=visual_specs,
-                        x_column=x_name,
-                        title=visual_title or None,
-                        base_name=visual_base or None,
-                        file_format=visual_format,
-                        show_legend=visual_show_legend,
-                    )
-                st.success(f"Report visivo salvato in {result['path']}")
-                mime = "application/pdf" if result["format"] == "pdf" else "image/png"
-                st.download_button(
-                    "Scarica report",
-                    data=result["bytes"],
-                    file_name=result["path"].name,
-                    mime=mime,
-                )
-                if result["format"] == "png":
-                    st.image(result["bytes"], caption="Anteprima report visivo", use_column_width=True)
-            except Exception as e:
-                st.error(f"Generazione report visivo fallita: {e}")
 
     st.divider()
     with st.expander("ℹ️ Info rilevate (clicca per espandere)", expanded=False):
