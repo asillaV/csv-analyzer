@@ -55,3 +55,6 @@ desktop.ini
 *.partial
 *.onecache
 *.gitattributes
+
+# === Cartella CSV di test ===
+tests_csv/
