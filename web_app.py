@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 from typing import Any, List, Optional, Sequence, Tuple
 
@@ -20,6 +21,55 @@ from core.signal_tools import (
     apply_filter,
     compute_fft,
 )
+
+# ---------------------- Streamlit compatibility helpers ---------------------- #
+def _supports_kwarg(func: Any, name: str) -> bool:
+    try:
+        return name in inspect.signature(func).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def _plotly_chart(container: Any, fig: go.Figure, **kwargs: Any) -> Any:
+    plot_func = container.plotly_chart
+    opts: dict[str, Any] = {}
+    if _supports_kwarg(plot_func, "width"):
+        opts["width"] = "stretch"
+    elif _supports_kwarg(plot_func, "use_container_width"):
+        opts["use_container_width"] = True
+    opts.update(kwargs)
+    return plot_func(fig, **opts)
+
+
+def _dataframe(data: Any, **kwargs: Any) -> Any:
+    opts: dict[str, Any] = {}
+    if _supports_kwarg(st.dataframe, "width"):
+        opts["width"] = "stretch"
+    elif _supports_kwarg(st.dataframe, "use_container_width"):
+        opts["use_container_width"] = True
+    opts.update(kwargs)
+    return st.dataframe(data, **opts)
+
+
+def _button(label: str, **kwargs: Any) -> Any:
+    opts: dict[str, Any] = {}
+    if _supports_kwarg(st.button, "width"):
+        opts["width"] = "stretch"
+    elif _supports_kwarg(st.button, "use_container_width"):
+        opts["use_container_width"] = True
+    opts.update(kwargs)
+    return st.button(label, **opts)
+
+
+def _image(data: Any, **kwargs: Any) -> Any:
+    opts: dict[str, Any] = {}
+    if _supports_kwarg(st.image, "use_column_width"):
+        opts["use_column_width"] = True
+    elif _supports_kwarg(st.image, "width"):
+        opts["width"] = "stretch"
+    opts.update(kwargs)
+    return st.image(data, **opts)
+
 
 # ---------------------- util ---------------------- #
 def _to_float_or_none(s: str) -> Optional[float]:
@@ -270,7 +320,7 @@ def main():
 
     st.success("File caricato.")
     n_preview = st.slider("Righe di anteprima", 5, 50, 10)
-    st.dataframe(df.head(n_preview), width="stretch")
+    _dataframe(df.head(n_preview))
     st.caption(f"Mostrate le prime {n_preview} righe su {len(df)} totali.")
 
     cols = meta.get("columns", list(df.columns))
@@ -448,7 +498,7 @@ def main():
         if xrange:
             combined.update_xaxes(range=xrange)
 
-        st.plotly_chart(combined, width="stretch")
+        _plotly_chart(st, combined)
 
         # FFT: una per serie, sotto
         if fftspec.enabled:
@@ -470,9 +520,9 @@ def main():
                     if freqs.size == 0:
                         st.info(f"FFT non calcolabile per {yname} (serie troppo corta o parametri non validi).")
                     else:
-                        st.plotly_chart(
+                        _plotly_chart(
+                            st,
                             _plot_fft(freqs, amp, title=f"FFT — {yname}"),
-                            width="stretch",
                         )
 
     elif mode == "Separati":
@@ -512,7 +562,7 @@ def main():
                 fig.add_trace(go.Scatter(x=x_ser if x_ser is not None else None, y=series, mode="lines",
                                          name=f"{yname} (originale)", line=dict(width=1, dash="dot")))
                 fig.data = fig.data[::-1]
-            host.plotly_chart(fig, width="stretch")
+            _plotly_chart(host, fig)
 
             # FFT per singola serie
             if fftspec.enabled:
@@ -524,9 +574,9 @@ def main():
                     if freqs.size == 0:
                         host.info(f"FFT non calcolabile per {yname} (serie troppo corta o parametri non validi).")
                     else:
-                        host.plotly_chart(
+                        _plotly_chart(
+                            host,
                             _plot_fft(freqs, amp, title=f"FFT — {yname}"),
-                            width="stretch",
                         )
 
     else:
@@ -564,7 +614,7 @@ def main():
                 fig.add_trace(go.Scatter(x=x_ser if x_ser is not None else None, y=series, mode="lines",
                                          name=f"{yname} (originale)", line=dict(width=1, dash="dot")))
                 fig.data = fig.data[::-1]
-            st.plotly_chart(fig, width="stretch")
+            _plotly_chart(st, fig)
 
             # FFT sotto ogni grafico (se attiva)
             if fftspec.enabled:
@@ -576,9 +626,9 @@ def main():
                     if freqs.size == 0:
                         st.info(f"FFT non calcolabile per {yname} (serie troppo corta o parametri non validi).")
                     else:
-                        st.plotly_chart(
+                        _plotly_chart(
+                            st,
                             _plot_fft(freqs, amp, title=f"FFT — {yname}"),
-                            width="stretch",
                         )
 
     # ---- Report ----
@@ -693,7 +743,7 @@ def main():
 
     btn_col1, btn_col2, btn_col3 = st.columns([1, 1, 2])
     with btn_col2:
-        generate_visual = st.button("Genera report visivo", width="stretch")
+        generate_visual = _button("Genera report visivo")
 
     if generate_visual:
         if not visual_specs:
@@ -732,7 +782,7 @@ def main():
             key="download_visual_report",
         )
         if visual_result["format"] == "png":
-            st.image(visual_result["bytes"], caption="Anteprima report visivo", use_column_width=True)
+            _image(visual_result["bytes"], caption="Anteprima report visivo")
 
     st.divider()
     with st.expander("ℹ️ Info rilevate (clicca per espandere)", expanded=False):
