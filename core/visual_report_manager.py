@@ -45,12 +45,15 @@ class VisualReportManager:
 
     # ------------------------------------------------------------------
     @staticmethod
-    def _ensure_kaleido_available() -> None:
-        """Garantisce che il backend Kaleido sia importabile.
+    def _ensure_kaleido_available() -> bool:
+        """Tenta di garantire che il backend Kaleido sia importabile.
 
-        In ambienti come Streamlit Cloud l'installazione dichiarata nei
-        requirements potrebbe non essere già attiva al primo avvio: in quel
-        caso viene tentata un'installazione automatica tramite ``pip``.
+        Restituisce ``True`` se il modulo è disponibile, ``False`` in caso
+        contrario. In ambienti "serverless" (es. Streamlit Cloud) l'installazione
+        dichiarata nei requirements potrebbe non essere già attiva al primo
+        avvio: in quel caso viene provata un'installazione automatica tramite
+        ``pip``. Eventuali errori vengono loggati e segnalati al chiamante via
+        ritorno ``False`` anziché generare un'eccezione bloccante.
         """
 
         import importlib.util
@@ -58,7 +61,7 @@ class VisualReportManager:
         import sys
 
         if importlib.util.find_spec("kaleido") is not None:
-            return
+            return True
 
         log.warning("Pacchetto 'kaleido' non trovato, tentativo di installazione runtime…")
         try:
@@ -73,15 +76,105 @@ class VisualReportManager:
             if result.stderr:
                 log.debug("pip install kaleido stderr: %s", result.stderr.strip())
         except Exception as exc:  # pragma: no cover - dipende dall'ambiente runtime
-            raise RuntimeError(
-                "Installazione automatica di 'kaleido' fallita. Verificare la connessione "
-                "di rete o installare manualmente la dipendenza."
-            ) from exc
+            log.warning("Installazione automatica di 'kaleido' fallita: %s", exc, exc_info=True)
+            return False
 
         if importlib.util.find_spec("kaleido") is None:
-            raise RuntimeError(
-                "Il pacchetto 'kaleido' non risulta disponibile dopo l'installazione automatica."
+            log.error("'kaleido' non risulta disponibile dopo l'installazione automatica.")
+            return False
+
+        return True
+
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _tune_kaleido_scope() -> None:
+        """Configura Kaleido per ambienti containerizzati/senza sandbox."""
+
+        try:
+            import plotly.io as pio  # pylint: disable=import-outside-toplevel
+        except Exception:  # pragma: no cover - dipende da runtime esterni
+            return
+
+        extra_args = ("--disable-gpu", "--no-sandbox")
+
+        def _merge_args(raw_value):
+            current = tuple(raw_value or ())
+            merged = tuple(dict.fromkeys(current + extra_args))
+            if merged == current:
+                return None
+            if isinstance(raw_value, list):
+                return list(merged)
+            return merged
+
+        defaults = getattr(pio, "defaults", None)
+        for candidate in (
+            getattr(getattr(defaults, "to_image", None), "kaleido", None),
+            getattr(defaults, "kaleido", None),
+            defaults,
+        ):
+            if candidate is None:
+                continue
+            try:
+                current_args = getattr(candidate, "chromium_args")
+            except AttributeError:
+                continue
+
+            merged_args = _merge_args(current_args)
+            if merged_args is not None:
+                try:
+                    setattr(candidate, "chromium_args", merged_args)
+                    return
+                except AttributeError:
+                    # Alcuni wrapper possono impedire l'assegnazione diretta
+                    log.debug("Impossibile aggiornare chromium_args sul namespace defaults Kaleido.")
+                    break
+
+        kaleido_module = getattr(pio, "kaleido", None)
+        scope = getattr(kaleido_module, "scope", None)
+        if scope is None:
+            return
+
+        try:
+            current_args = getattr(scope, "chromium_args")
+        except AttributeError:
+            log.debug(
+                "Kaleido scope non espone chromium_args; salto configurazione sandbox (Plotly >= 6?)."
             )
+            return
+
+        merged_args = _merge_args(current_args)
+        if merged_args is not None:
+            try:
+                setattr(scope, "chromium_args", merged_args)
+            except AttributeError:
+                log.debug("Impossibile impostare chromium_args su Kaleido scope; ignorato.")
+
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _describe_kaleido_failure(error: Exception | str) -> str:
+        """Genera un messaggio user-friendly per gli errori Kaleido."""
+
+        message = str(error).strip()
+        if not message:
+            return (
+                "Esportazione Kaleido non riuscita per un motivo sconosciuto. "
+                "Utilizzare il formato HTML come alternativa."
+            )
+
+        lowered = message.lower()
+        if "requires google chrome" in lowered or "chromium" in lowered:
+            return (
+                "Kaleido richiede Google Chrome/Chromium preinstallato. "
+                "In ambienti gestiti (es. Streamlit Cloud) non è possibile installarlo: "
+                "utilizzare il download HTML oppure eseguire l'app in locale con un browser disponibile."
+            )
+        if "kaleido" in lowered and "install" in lowered:
+            return (
+                "La dipendenza Kaleido non è disponibile. "
+                "Verificare l'installazione (pip install kaleido) oppure usare l'esportazione HTML."
+            )
+
+        return message
 
     # ------------------------------------------------------------------
     @staticmethod
@@ -182,9 +275,11 @@ class VisualReportManager:
         x_range: Optional[Sequence] = None,
         y_range: Optional[Sequence[float]] = None,
     ) -> dict:
-        """Genera il report visivo e lo salva come PNG o PDF.
+        """Genera il report visivo e lo salva come PNG, PDF oppure HTML.
 
-        Restituisce un dict con figure Plotly, percorso del file e contenuto binario.
+        Restituisce un dict con figure Plotly, percorso del file e contenuto
+        binario. In assenza del backend Kaleido (necessario per PNG/PDF) viene
+        effettuato un fallback automatico su HTML interattivo.
         """
 
         spec_list: List[VisualPlotSpec] = [s for s in specs]
@@ -194,8 +289,8 @@ class VisualReportManager:
             raise ValueError("Il report visivo supporta al massimo 4 grafici.")
 
         fmt = (file_format or "png").strip().lower()
-        if fmt not in {"png", "pdf"}:
-            raise ValueError("Formato non supportato. Usare 'png' oppure 'pdf'.")
+        if fmt not in {"png", "pdf", "html"}:
+            raise ValueError("Formato non supportato. Usare 'png', 'pdf' oppure 'html'.")
 
         fig = self._build_figure(
             df=df,
@@ -212,23 +307,56 @@ class VisualReportManager:
         base = base_name.strip() if base_name else ""
         if not base:
             base = f"visual_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        filename = f"{self._sanitize_filename(base)}.{fmt}"
-        output_path = self.output_dir / filename
+        base_name = self._sanitize_filename(base)
 
         width = 1280
         height = height_per_plot * len(spec_list)
 
-        self._ensure_kaleido_available()
+        requested_fmt = fmt
+        fallback_reason: Optional[str] = None
 
-        try:
-            image_bytes = fig.to_image(format=fmt, width=width, height=height, scale=scale)
-        except Exception as exc:
-            raise RuntimeError(
-                "Impossibile esportare il report visivo. Verificare l'installazione di 'kaleido' e "
-                "che l'ambiente supporti la generazione di immagini statiche."
-            ) from exc
+        if fmt == "html":
+            export_bytes = fig.to_html(full_html=True, include_plotlyjs="cdn").encode("utf-8")
+            final_fmt = "html"
+        else:
+            kaleido_available = self._ensure_kaleido_available()
+            if kaleido_available:
+                self._tune_kaleido_scope()
+                try:
+                    export_bytes = fig.to_image(
+                        format=fmt,
+                        width=width,
+                        height=height,
+                        scale=scale,
+                    )
+                    final_fmt = fmt
+                except Exception as exc:  # pragma: no cover - dipende da ambiente kaleido
+                    log.warning("Esportazione Kaleido fallita, uso fallback HTML: %s", exc, exc_info=True)
+                    fallback_reason = self._describe_kaleido_failure(exc)
+                    kaleido_available = False
+            else:
+                fallback_reason = self._describe_kaleido_failure(
+                    "Kaleido non disponibile nell'ambiente runtime."
+                )
 
-        output_path.write_bytes(image_bytes)
+            if fmt != "html" and not kaleido_available:
+                export_bytes = fig.to_html(full_html=True, include_plotlyjs="cdn").encode("utf-8")
+                final_fmt = "html"
+        filename = f"{base_name}.{final_fmt}"
+        output_path = self.output_dir / filename
+
+        output_path.write_bytes(export_bytes)
         log.info("Report visivo salvato in %s", output_path)
 
-        return {"figure": fig, "path": output_path, "bytes": image_bytes, "format": fmt}
+        result = {
+            "figure": fig,
+            "path": output_path,
+            "bytes": export_bytes,
+            "format": final_fmt,
+        }
+        if requested_fmt != final_fmt:
+            result["requested_format"] = requested_fmt
+        if fallback_reason:
+            result["fallback_reason"] = fallback_reason
+
+        return result
