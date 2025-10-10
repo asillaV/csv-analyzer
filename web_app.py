@@ -763,7 +763,7 @@ def main():
                         df=df,
                         specs=visual_specs,
                         x_column=x_name,
-                        title=visual_title or None,
+                        title=visual_title or "", #modifica per eliminare "udefined" su report html quando titolo vuoto
                         base_name=visual_base or None,
                         file_format=visual_format,
                         show_legend=visual_show_legend,
