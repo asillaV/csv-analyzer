@@ -742,7 +742,8 @@ def main():
     with col_vis2:
         visual_format = st.radio(
             "Formato",
-            ["png", "pdf", "html"],
+            ["html"],
+            #["png", "pdf", "html"], <-- Per eliminare "pdf" e "png" in cloud (Plotly non supporta più l'export in questi formati)
             horizontal=True,
             key="vis_report_format",
         )
