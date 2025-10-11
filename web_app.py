@@ -26,7 +26,6 @@ from core.signal_tools import (
 # ---------------------- Reset helpers ---------------------- #
 RESETTABLE_KEYS = {
     # Form principali
-    "file_upload",
     "x_col",
     "y_cols",
     "plot_mode",
@@ -54,10 +53,7 @@ RESETTABLE_KEYS = {
     "vis_report_base",
     "vis_report_format",
     "vis_report_legend",
-    "_sample_bytes",
-    "_sample_file_name",
     "_sample_error",
-    "_clear_file_uploader",
 }
 
 MIN_ROWS_FOR_FFT = 128
