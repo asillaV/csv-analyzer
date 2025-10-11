@@ -40,6 +40,9 @@ def load_csv(
         )
         log.info("CSV caricato: %s (righe=%d, colonne=%d)", path.name, len(df), len(df.columns))
         return df
+    except pd.errors.EmptyDataError as ede:
+        log.error("File CSV vuoto o non leggibile (%s): %s", path.name, ede, exc_info=True)
+        raise
     except ValueError as ve:
         log.error("Valore non valido in load_csv (usecols o header): %s", ve, exc_info=True)
         raise
