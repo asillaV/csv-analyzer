@@ -22,6 +22,68 @@ from core.signal_tools import (
     compute_fft,
 )
 
+# ---------------------- Reset helpers ---------------------- #
+RESETTABLE_KEYS = {
+    # Form principali
+    "x_col",
+    "y_cols",
+    "plot_mode",
+    "x_min_txt",
+    "x_max_txt",
+    "y_min_txt",
+    "y_max_txt",
+    # Advanced
+    "manual_fs",
+    "enable_filter",
+    "f_kind",
+    "ma_win",
+    "f_order",
+    "f_lo",
+    "f_hi",
+    "overlay_orig",
+    "enable_fft",
+    "fft_use",
+    "detrend",
+    # Report testuale
+    "report_format",
+    "report_base_name",
+    # Report visivo (campi globali)
+    "vis_report_main_title",
+    "vis_report_base",
+    "vis_report_format",
+    "vis_report_legend",
+}
+
+
+def _reset_all_settings() -> None:
+    """Resetta tutti i controlli e gli output, senza toccare il file caricato.
+
+    Strategia: rimuove le chiavi di sessione dei widget (così tornano ai default)
+    e gli artefatti di output/plot. Poi richiede un rerun per applicare subito.
+    """
+    # Pulisci chiavi note
+    for k in list(RESETTABLE_KEYS):
+        st.session_state.pop(k, None)
+
+    # Pulisci chiavi per-plot del report visivo
+    for key in list(st.session_state.keys()):
+        if isinstance(key, str) and key.startswith("vis_report_"):
+            st.session_state.pop(key, None)
+
+    # Pulisci flag interni e output generati
+    st.session_state.pop("_plots_ready", None)
+    st.session_state.pop("_generated_report", None)
+    st.session_state.pop("_generated_report_error", None)
+    st.session_state.pop("_generated_visual_report", None)
+    st.session_state.pop("_generated_visual_report_error", None)
+
+    # Bump del nonce del form controlli per resettare i widget senza keys
+    st.session_state["_controls_nonce"] = st.session_state.get("_controls_nonce", 0) + 1
+
+    # Non tocchiamo _last_uploaded_file_id o lo stato dell'uploader
+    # Rerun per applicare subito i default
+    st.rerun()
+
 # ---------------------- Streamlit compatibility helpers ---------------------- #
 def _supports_kwarg(func: Any, name: str) -> bool:
     try:
@@ -325,10 +387,16 @@ def main():
     _dataframe(df.head(n_preview))
     st.caption(f"Mostrate le prime {n_preview} righe su {len(df)} totali.")
 
+    # Pulsante Reset impostazioni (non rimuove il file caricato)
+    rc1, rc2 = st.columns([3, 1])
+    with rc2:
+        if _button("Reset impostazioni"):
+            _reset_all_settings()
+
     cols = meta.get("columns", list(df.columns))
 
     # --- Controlli (form) --- #
-    with st.form("controls"):
+    with st.form(f"controls_{st.session_state.get('_controls_nonce', 0)}"):
         x_col = st.selectbox("Colonna X (opzionale)", options=["—"] + cols, index=0)
         y_cols = st.multiselect("Colonne Y", options=cols)
         mode = st.radio("Modalità grafico", ["Sovrapposto", "Separati", "Cascata"], horizontal=True, index=0)
@@ -638,8 +706,17 @@ def main():
     st.subheader("Report statistici")
     col_r1, col_r2 = st.columns([1, 2])
     with col_r1:
-        fmt = st.selectbox("Formato", ["csv", "csv+md", "csv+html", "csv+md+html"], index=0)
-        base_name = st.text_input("Nome base report (opzionale)", placeholder="es. report_misura_001")
+        fmt = st.selectbox(
+            "Formato",
+            ["csv", "csv+md", "csv+html", "csv+md+html"],
+            index=0,
+            key="report_format",
+        )
+        base_name = st.text_input(
+            "Nome base report (opzionale)",
+            placeholder="es. report_misura_001",
+            key="report_base_name",
+        )
     with col_r2:
         if st.button("Genera report"):
             try:
