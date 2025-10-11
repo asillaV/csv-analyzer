@@ -54,6 +54,8 @@ RESETTABLE_KEYS = {
     "vis_report_legend",
 }
 
+MIN_ROWS_FOR_FFT = 128
+
 
 def _reset_all_settings() -> None:
     """Resetta tutti i controlli e gli output, senza toccare il file caricato.
@@ -385,7 +387,8 @@ def main():
     st.success("File caricato.")
     n_preview = st.slider("Righe di anteprima", 5, 50, 10)
     _dataframe(df.head(n_preview))
-    st.caption(f"Mostrate le prime {n_preview} righe su {len(df)} totali.")
+    total_rows = len(df)
+    st.caption(f"Mostrate le prime {n_preview} righe su {total_rows} totali.")
 
     # Pulsante Reset impostazioni (non rimuove il file caricato)
     rc1, rc2 = st.columns([3, 1])
@@ -394,6 +397,7 @@ def main():
             _reset_all_settings()
 
     cols = meta.get("columns", list(df.columns))
+    fft_available = total_rows >= MIN_ROWS_FOR_FFT
 
     # --- Controlli (form) --- #
     with st.form(f"controls_{st.session_state.get('_controls_nonce', 0)}"):
@@ -430,16 +434,46 @@ def main():
 
             cc1, cc2 = st.columns(2)
             with cc1:
-                f_lo = st.text_input("Cutoff low (Hz) — LP/HP/BP", placeholder="es. 5")
+                f_lo = st.text_input("Cutoff low (Hz) - LP/HP/BP", placeholder="es. 5")
             with cc2:
-                f_hi = st.text_input("Cutoff high (Hz) — solo BP", placeholder="es. 20")
+                f_hi = st.text_input("Cutoff high (Hz) - solo BP", placeholder="es. 20")
 
             overlay_orig = st.checkbox("Sovrapponi originale e filtrato", value=True)
 
             st.markdown("---")
-            enable_fft = st.checkbox("Calcola FFT", value=False)
-            fft_use = st.radio("FFT su", ["Filtrato (se attivo)", "Originale"], horizontal=True, index=0)
-            detrend = st.checkbox("Detrend (togli media)", value=True)
+            fft_help = (
+                "Calcola lo spettro FFT per ogni serie selezionata."
+                if fft_available
+                else f"Servono almeno {MIN_ROWS_FOR_FFT} campioni per calcolare l'FFT."
+            )
+            if not fft_available:
+                st.session_state["enable_fft"] = False
+
+            enable_fft = st.checkbox(
+                "Calcola FFT",
+                value=bool(st.session_state.get("enable_fft", False)),
+                key="enable_fft",
+                disabled=not fft_available,
+                help=fft_help,
+            )
+            if not fft_available:
+                st.caption(
+                    f"Servono almeno {MIN_ROWS_FOR_FFT} campioni (dataset attuale: {total_rows})."
+                )
+
+            fft_use = st.radio(
+                "FFT su",
+                ["Filtrato (se attivo)", "Originale"],
+                horizontal=True,
+                key="fft_use",
+                disabled=not fft_available,
+            )
+            detrend = st.checkbox(
+                "Detrend (togli media)",
+                value=True,
+                key="detrend",
+                disabled=not fft_available,
+            )
 
         submitted = st.form_submit_button("Applica / Plot")
 
@@ -502,6 +536,19 @@ def main():
     xrange = None
     if x_name and x_values is not None:
         xrange = _parse_range_x(x_min_txt, x_max_txt, x_values)
+    else:
+        xmin_idx = _to_float_or_none(x_min_txt)
+        xmax_idx = _to_float_or_none(x_max_txt)
+        if xmin_idx is not None or xmax_idx is not None:
+            # Usa l'indice numerico implicito quando manca una colonna X esplicita
+            default_min = 0.0
+            default_max = float(len(df) - 1) if len(df) > 0 else 0.0
+            if xmin_idx is None:
+                xmin_idx = default_min
+            if xmax_idx is None:
+                xmax_idx = default_max
+            if xmin_idx != xmax_idx:
+                xrange = (xmin_idx, xmax_idx)
 
     # ========================= PLOT ========================= #
     if mode == "Sovrapposto":
