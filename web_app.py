@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -21,6 +22,72 @@ from core.signal_tools import (
     apply_filter,
     compute_fft,
 )
+
+# ---------------------- Reset helpers ---------------------- #
+RESETTABLE_KEYS = {
+    # Form principali
+    "x_col",
+    "y_cols",
+    "plot_mode",
+    "x_min_txt",
+    "x_max_txt",
+    "y_min_txt",
+    "y_max_txt",
+    # Advanced
+    "manual_fs",
+    "enable_filter",
+    "f_kind",
+    "ma_win",
+    "f_order",
+    "f_lo",
+    "f_hi",
+    "overlay_orig",
+    "enable_fft",
+    "fft_use",
+    "detrend",
+    # Report testuale
+    "report_format",
+    "report_base_name",
+    # Report visivo (campi globali)
+    "vis_report_main_title",
+    "vis_report_base",
+    "vis_report_format",
+    "vis_report_legend",
+    "_sample_error",
+}
+
+MIN_ROWS_FOR_FFT = 128
+SAMPLE_CSV_PATH = Path("assets/sample_timeseries.csv")
+
+
+def _reset_all_settings() -> None:
+    """Resetta tutti i controlli e gli output, senza toccare il file caricato.
+
+    Strategia: rimuove le chiavi di sessione dei widget (così tornano ai default)
+    e gli artefatti di output/plot. Poi richiede un rerun per applicare subito.
+    """
+    # Pulisci chiavi note
+    for k in list(RESETTABLE_KEYS):
+        st.session_state.pop(k, None)
+
+    # Pulisci chiavi per-plot del report visivo
+    for key in list(st.session_state.keys()):
+        if isinstance(key, str) and key.startswith("vis_report_"):
+            st.session_state.pop(key, None)
+
+    # Pulisci flag interni e output generati
+    st.session_state.pop("_plots_ready", None)
+    st.session_state.pop("_generated_report", None)
+    st.session_state.pop("_generated_report_error", None)
+    st.session_state.pop("_generated_visual_report", None)
+    st.session_state.pop("_generated_visual_report_error", None)
+
+    # Bump del nonce del form controlli per resettare i widget senza keys
+    st.session_state["_controls_nonce"] = st.session_state.get("_controls_nonce", 0) + 1
+
+    # Non tocchiamo _last_uploaded_file_id o lo stato dell'uploader
+    # Rerun per applicare subito i default
+    st.rerun()
 
 # ---------------------- Streamlit compatibility helpers ---------------------- #
 def _supports_kwarg(func: Any, name: str) -> bool:
@@ -300,35 +367,168 @@ def main():
 
     st.caption("Upload CSV → seleziona X/Y → limiti assi → Advanced (fs/filtri/FFT) → report")
 
-    upload = st.file_uploader("Carica un file CSV", type=["csv"])
-    _reset_generated_reports_marker(upload)
-    if not upload:
-        st.info("Carica un file per iniziare.")
+    st.markdown(
+        """
+        <style>
+        .file-upload-wrapper {
+            position: relative;
+        }
+        .file-upload-wrapper div[data-testid="stFileUploader"] > div:first-child {
+            padding-bottom: 5.6rem;
+        }
+        .file-upload-wrapper div[data-testid="stButton"] {
+            position: absolute;
+            right: 1.2rem;
+            bottom: 1.2rem;
+            margin: 0;
+            width: 200px;
+            z-index: 2;
+        }
+        .file-upload-wrapper div[data-testid="stButton"] button {
+            width: 100%;
+            min-height: 3rem;
+            border-radius: 12px;
+            background: linear-gradient(135deg, #2b2d35 0%, #1f2027 100%);
+            color: #f1f3f6;
+            font-weight: 600;
+            border: 1px solid #34353d;
+            transition: all .18s ease-in-out;
+        }
+        .file-upload-wrapper div[data-testid="stButton"] button:hover {
+            background: linear-gradient(135deg, #353741 0%, #2a2b33 100%);
+            border-color: #4b4d58;
+        }
+        .file-upload-wrapper div[data-testid="stButton"] button:active {
+            transform: translateY(1px);
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    if st.session_state.pop("_clear_file_uploader", False):
+        st.session_state.pop("file_upload", None)
+
+    sample_bytes = st.session_state.get("_sample_bytes")
+    sample_name = st.session_state.get("_sample_file_name", SAMPLE_CSV_PATH.name)
+
+    sample_available = SAMPLE_CSV_PATH.exists()
+
+    with st.container():
+        st.markdown('<div class="file-upload-wrapper">', unsafe_allow_html=True)
+        upload = st.file_uploader(
+            "Carica un file CSV",
+            type=["csv"],
+            key="file_upload",
+        )
+        sample_clicked = st.button(
+            "Carica sample",
+            key="load_sample",
+            disabled=not sample_available,
+            help="Carica un dataset demo multi-canale (segnale + rumore).",
+        )
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    if sample_clicked:
+        if sample_available:
+            try:
+                data = SAMPLE_CSV_PATH.read_bytes()
+                st.session_state["_sample_bytes"] = data
+                st.session_state["_sample_file_name"] = SAMPLE_CSV_PATH.name
+                st.session_state["_clear_file_uploader"] = True
+                st.session_state.pop("_sample_error", None)
+                st.rerun()
+            except Exception as exc:
+                st.session_state.pop("_sample_bytes", None)
+                st.session_state.pop("_sample_file_name", None)
+                st.session_state["_sample_error"] = str(exc)
+                st.rerun()
+    if not sample_available:
+        st.caption("Sample non disponibile.")
+
+    sample_error = st.session_state.pop("_sample_error", None)
+    if sample_error:
+        st.error(f"Caricamento sample fallito: {sample_error}")
+
+    sample_bytes = st.session_state.get("_sample_bytes")
+    sample_name = st.session_state.get("_sample_file_name", SAMPLE_CSV_PATH.name)
+
+    if upload is not None:
+        st.session_state.pop("_sample_bytes", None)
+        st.session_state.pop("_sample_file_name", None)
+        sample_bytes = None
+        sample_name = SAMPLE_CSV_PATH.name
+
+    current_file: Optional[Any] = upload
+    if current_file is None and sample_bytes is not None:
+        current_file = SimpleNamespace(name=sample_name, size=len(sample_bytes))
+
+    _reset_generated_reports_marker(current_file)
+
+    if current_file is None:
+        hint = "Carica un file per iniziare."
+        if SAMPLE_CSV_PATH.exists():
+            hint = "Carica un file oppure usa 'Carica sample' per iniziare."
+        st.info(hint)
         return
 
-    # Analisi CSV (encoding/delimiter/header/columns)
-    with st.spinner("Analisi CSV..."):
-        upload_bytes = upload.getvalue()
-        with open(Path("tmp_upload.csv"), "wb") as f:
-            f.write(upload_bytes)
-        upload.seek(0)
-        meta = analyze_csv("tmp_upload.csv")
-        df = load_csv(
-            "tmp_upload.csv",
-            encoding=meta.get("encoding"),
-            delimiter=meta.get("delimiter"),
-            header=meta.get("header"),
-        )
+    using_sample = upload is None
 
-    st.success("File caricato.")
+    tmp_path = Path("tmp_upload.csv")
+
+    try:
+        with st.spinner("Analisi CSV..."):
+            if using_sample and sample_bytes is not None:
+                tmp_path.write_bytes(sample_bytes)
+            else:
+                upload_bytes = upload.getvalue()
+                if not upload_bytes:
+                    raise ValueError("Il file caricato è vuoto.")
+                tmp_path.write_bytes(upload_bytes)
+                upload.seek(0)
+
+            if not tmp_path.exists() or tmp_path.stat().st_size == 0:
+                raise ValueError("Il file caricato è vuoto o non è stato salvato correttamente.")
+
+            meta = analyze_csv(str(tmp_path))
+            df = load_csv(
+                str(tmp_path),
+                encoding=meta.get("encoding"),
+                delimiter=meta.get("delimiter"),
+                header=meta.get("header"),
+            )
+    except pd.errors.EmptyDataError:
+        st.error(
+            "Il file sembra vuoto (nessuna colonna rilevata). Verifica l'esportazione e riprova."
+        )
+        return
+    except ValueError as ve:
+        st.error(str(ve))
+        return
+    except Exception as exc:
+        st.error(f"Errore nel parsing del CSV: {exc}")
+        return
+
+    if using_sample:
+        st.success(f"Sample '{sample_name}' caricato.")
+    else:
+        st.success("File caricato.")
     n_preview = st.slider("Righe di anteprima", 5, 50, 10)
     _dataframe(df.head(n_preview))
-    st.caption(f"Mostrate le prime {n_preview} righe su {len(df)} totali.")
+    total_rows = len(df)
+    st.caption(f"Mostrate le prime {n_preview} righe su {total_rows} totali.")
+
+    # Pulsante Reset impostazioni (non rimuove il file caricato)
+    rc1, rc2 = st.columns([3, 1])
+    with rc2:
+        if _button("Reset impostazioni"):
+            _reset_all_settings()
 
     cols = meta.get("columns", list(df.columns))
+    fft_available = total_rows >= MIN_ROWS_FOR_FFT
 
     # --- Controlli (form) --- #
-    with st.form("controls"):
+    with st.form(f"controls_{st.session_state.get('_controls_nonce', 0)}"):
         x_col = st.selectbox("Colonna X (opzionale)", options=["—"] + cols, index=0)
         y_cols = st.multiselect("Colonne Y", options=cols)
         mode = st.radio("Modalità grafico", ["Sovrapposto", "Separati", "Cascata"], horizontal=True, index=0)
@@ -362,16 +562,46 @@ def main():
 
             cc1, cc2 = st.columns(2)
             with cc1:
-                f_lo = st.text_input("Cutoff low (Hz) — LP/HP/BP", placeholder="es. 5")
+                f_lo = st.text_input("Cutoff low (Hz) - LP/HP/BP", placeholder="es. 5")
             with cc2:
-                f_hi = st.text_input("Cutoff high (Hz) — solo BP", placeholder="es. 20")
+                f_hi = st.text_input("Cutoff high (Hz) - solo BP", placeholder="es. 20")
 
             overlay_orig = st.checkbox("Sovrapponi originale e filtrato", value=True)
 
             st.markdown("---")
-            enable_fft = st.checkbox("Calcola FFT", value=False)
-            fft_use = st.radio("FFT su", ["Filtrato (se attivo)", "Originale"], horizontal=True, index=0)
-            detrend = st.checkbox("Detrend (togli media)", value=True)
+            fft_help = (
+                "Calcola lo spettro FFT per ogni serie selezionata."
+                if fft_available
+                else f"Servono almeno {MIN_ROWS_FOR_FFT} campioni per calcolare l'FFT."
+            )
+            if not fft_available:
+                st.session_state["enable_fft"] = False
+
+            enable_fft = st.checkbox(
+                "Calcola FFT",
+                value=bool(st.session_state.get("enable_fft", False)),
+                key="enable_fft",
+                disabled=not fft_available,
+                help=fft_help,
+            )
+            if not fft_available:
+                st.caption(
+                    f"Servono almeno {MIN_ROWS_FOR_FFT} campioni (dataset attuale: {total_rows})."
+                )
+
+            fft_use = st.radio(
+                "FFT su",
+                ["Filtrato (se attivo)", "Originale"],
+                horizontal=True,
+                key="fft_use",
+                disabled=not fft_available,
+            )
+            detrend = st.checkbox(
+                "Detrend (togli media)",
+                value=True,
+                key="detrend",
+                disabled=not fft_available,
+            )
 
         submitted = st.form_submit_button("Applica / Plot")
 
@@ -434,6 +664,19 @@ def main():
     xrange = None
     if x_name and x_values is not None:
         xrange = _parse_range_x(x_min_txt, x_max_txt, x_values)
+    else:
+        xmin_idx = _to_float_or_none(x_min_txt)
+        xmax_idx = _to_float_or_none(x_max_txt)
+        if xmin_idx is not None or xmax_idx is not None:
+            # Usa l'indice numerico implicito quando manca una colonna X esplicita
+            default_min = 0.0
+            default_max = float(len(df) - 1) if len(df) > 0 else 0.0
+            if xmin_idx is None:
+                xmin_idx = default_min
+            if xmax_idx is None:
+                xmax_idx = default_max
+            if xmin_idx != xmax_idx:
+                xrange = (xmin_idx, xmax_idx)
 
     # ========================= PLOT ========================= #
     if mode == "Sovrapposto":
@@ -638,8 +881,17 @@ def main():
     st.subheader("Report statistici")
     col_r1, col_r2 = st.columns([1, 2])
     with col_r1:
-        fmt = st.selectbox("Formato", ["csv", "csv+md", "csv+html", "csv+md+html"], index=0)
-        base_name = st.text_input("Nome base report (opzionale)", placeholder="es. report_misura_001")
+        fmt = st.selectbox(
+            "Formato",
+            ["csv", "csv+md", "csv+html", "csv+md+html"],
+            index=0,
+            key="report_format",
+        )
+        base_name = st.text_input(
+            "Nome base report (opzionale)",
+            placeholder="es. report_misura_001",
+            key="report_base_name",
+        )
     with col_r2:
         if st.button("Genera report"):
             try:
@@ -742,7 +994,8 @@ def main():
     with col_vis2:
         visual_format = st.radio(
             "Formato",
-            ["png", "pdf", "html"],
+            ["html"],
+            #["png", "pdf", "html"], <-- Per eliminare "pdf" e "png" in cloud (Plotly non supporta più l'export in questi formati)
             horizontal=True,
             key="vis_report_format",
         )
@@ -763,7 +1016,7 @@ def main():
                         df=df,
                         specs=visual_specs,
                         x_column=x_name,
-                        title=visual_title or None,
+                        title=visual_title or "", #modifica per eliminare "udefined" su report html quando titolo vuoto
                         base_name=visual_base or None,
                         file_format=visual_format,
                         show_legend=visual_show_legend,
