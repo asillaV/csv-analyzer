@@ -740,7 +740,13 @@ def main():
         visual_title = st.text_input("Titolo report visivo", key="vis_report_main_title")
         visual_base = st.text_input("Nome file (opzionale)", placeholder="es. report_visivo", key="vis_report_base")
     with col_vis2:
-        visual_format = st.radio("Formato", ["png", "pdf"], horizontal=True, key="vis_report_format")
+        visual_format = st.radio(
+            "Formato",
+            ["html"],
+            #["png", "pdf", "html"], <-- Per eliminare "pdf" e "png" in cloud (Plotly non supporta più l'export in questi formati)
+            horizontal=True,
+            key="vis_report_format",
+        )
         visual_show_legend = st.checkbox("Mostra legenda", value=False, key="vis_report_legend")
 
     btn_col1, btn_col2, btn_col3 = st.columns([1, 1, 2])
@@ -758,7 +764,7 @@ def main():
                         df=df,
                         specs=visual_specs,
                         x_column=x_name,
-                        title=visual_title or None,
+                        title=visual_title or "", #modifica per eliminare "udefined" su report html quando titolo vuoto
                         base_name=visual_base or None,
                         file_format=visual_format,
                         show_legend=visual_show_legend,
@@ -776,8 +782,26 @@ def main():
         st.error(f"Generazione report visivo fallita: {visual_error}")
     visual_result = st.session_state.get("_generated_visual_report")
     if visual_result:
+        actual_format = visual_result["format"]
+        requested_format = visual_result.get("requested_format", actual_format)
+        fallback_reason = visual_result.get("fallback_reason")
+
         st.success(f"Report visivo salvato in {visual_result['path']}")
-        mime = "application/pdf" if visual_result["format"] == "pdf" else "image/png"
+        if requested_format != actual_format:
+            warning_msg = (
+                f"Il formato {requested_format.upper()} non è disponibile in questo ambiente. "
+                f"Il report è stato esportato come {actual_format.upper()}."
+            )
+            st.warning(warning_msg)
+            if fallback_reason:
+                st.caption(f"Dettagli: {fallback_reason}")
+
+        if actual_format == "pdf":
+            mime = "application/pdf"
+        elif actual_format == "html":
+            mime = "text/html"
+        else:
+            mime = "image/png"
         st.download_button(
             "Scarica report",
             data=visual_result["bytes"],
@@ -785,8 +809,11 @@ def main():
             mime=mime,
             key="download_visual_report",
         )
-        if visual_result["format"] == "png":
+        if actual_format == "png":
             _image(visual_result["bytes"], caption="Anteprima report visivo")
+        elif actual_format == "html":
+            st.info("Anteprima interattiva generata in formato HTML.")
+            _plotly_chart(st, visual_result["figure"], key="visual_report_preview")
 
     st.divider()
     with st.expander("ℹ️ Info rilevate (clicca per espandere)", expanded=False):
