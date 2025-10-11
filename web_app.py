@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -25,6 +26,7 @@ from core.signal_tools import (
 # ---------------------- Reset helpers ---------------------- #
 RESETTABLE_KEYS = {
     # Form principali
+    "file_upload",
     "x_col",
     "y_cols",
     "plot_mode",
@@ -52,9 +54,14 @@ RESETTABLE_KEYS = {
     "vis_report_base",
     "vis_report_format",
     "vis_report_legend",
+    "_sample_bytes",
+    "_sample_file_name",
+    "_sample_error",
+    "_clear_file_uploader",
 }
 
 MIN_ROWS_FOR_FFT = 128
+SAMPLE_CSV_PATH = Path("assets/sample_timeseries.csv")
 
 
 def _reset_all_settings() -> None:
@@ -364,27 +371,152 @@ def main():
 
     st.caption("Upload CSV → seleziona X/Y → limiti assi → Advanced (fs/filtri/FFT) → report")
 
-    upload = st.file_uploader("Carica un file CSV", type=["csv"])
-    _reset_generated_reports_marker(upload)
-    if not upload:
-        st.info("Carica un file per iniziare.")
+    st.markdown(
+        """
+        <style>
+        .file-upload-wrapper {
+            position: relative;
+        }
+        .file-upload-wrapper div[data-testid="stFileUploader"] > div:first-child {
+            padding-bottom: 5.6rem;
+        }
+        .file-upload-wrapper div[data-testid="stButton"] {
+            position: absolute;
+            right: 1.2rem;
+            bottom: 1.2rem;
+            margin: 0;
+            width: 200px;
+            z-index: 2;
+        }
+        .file-upload-wrapper div[data-testid="stButton"] button {
+            width: 100%;
+            min-height: 3rem;
+            border-radius: 12px;
+            background: linear-gradient(135deg, #2b2d35 0%, #1f2027 100%);
+            color: #f1f3f6;
+            font-weight: 600;
+            border: 1px solid #34353d;
+            transition: all .18s ease-in-out;
+        }
+        .file-upload-wrapper div[data-testid="stButton"] button:hover {
+            background: linear-gradient(135deg, #353741 0%, #2a2b33 100%);
+            border-color: #4b4d58;
+        }
+        .file-upload-wrapper div[data-testid="stButton"] button:active {
+            transform: translateY(1px);
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    if st.session_state.pop("_clear_file_uploader", False):
+        st.session_state.pop("file_upload", None)
+
+    sample_bytes = st.session_state.get("_sample_bytes")
+    sample_name = st.session_state.get("_sample_file_name", SAMPLE_CSV_PATH.name)
+
+    sample_available = SAMPLE_CSV_PATH.exists()
+
+    with st.container():
+        st.markdown('<div class="file-upload-wrapper">', unsafe_allow_html=True)
+        upload = st.file_uploader(
+            "Carica un file CSV",
+            type=["csv"],
+            key="file_upload",
+        )
+        sample_clicked = st.button(
+            "Carica sample",
+            key="load_sample",
+            disabled=not sample_available,
+            help="Carica un dataset demo multi-canale (segnale + rumore).",
+        )
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    if sample_clicked:
+        if sample_available:
+            try:
+                data = SAMPLE_CSV_PATH.read_bytes()
+                st.session_state["_sample_bytes"] = data
+                st.session_state["_sample_file_name"] = SAMPLE_CSV_PATH.name
+                st.session_state["_clear_file_uploader"] = True
+                st.session_state.pop("_sample_error", None)
+                st.rerun()
+            except Exception as exc:
+                st.session_state.pop("_sample_bytes", None)
+                st.session_state.pop("_sample_file_name", None)
+                st.session_state["_sample_error"] = str(exc)
+                st.rerun()
+    if not sample_available:
+        st.caption("Sample non disponibile.")
+
+    sample_error = st.session_state.pop("_sample_error", None)
+    if sample_error:
+        st.error(f"Caricamento sample fallito: {sample_error}")
+
+    sample_bytes = st.session_state.get("_sample_bytes")
+    sample_name = st.session_state.get("_sample_file_name", SAMPLE_CSV_PATH.name)
+
+    if upload is not None:
+        st.session_state.pop("_sample_bytes", None)
+        st.session_state.pop("_sample_file_name", None)
+        sample_bytes = None
+        sample_name = SAMPLE_CSV_PATH.name
+
+    current_file: Optional[Any] = upload
+    if current_file is None and sample_bytes is not None:
+        current_file = SimpleNamespace(name=sample_name, size=len(sample_bytes))
+
+    _reset_generated_reports_marker(current_file)
+
+    if current_file is None:
+        hint = "Carica un file per iniziare."
+        if SAMPLE_CSV_PATH.exists():
+            hint = "Carica un file oppure usa 'Carica sample' per iniziare."
+        st.info(hint)
         return
 
-    # Analisi CSV (encoding/delimiter/header/columns)
-    with st.spinner("Analisi CSV..."):
-        upload_bytes = upload.getvalue()
-        with open(Path("tmp_upload.csv"), "wb") as f:
-            f.write(upload_bytes)
-        upload.seek(0)
-        meta = analyze_csv("tmp_upload.csv")
-        df = load_csv(
-            "tmp_upload.csv",
-            encoding=meta.get("encoding"),
-            delimiter=meta.get("delimiter"),
-            header=meta.get("header"),
-        )
+    using_sample = upload is None
 
-    st.success("File caricato.")
+    tmp_path = Path("tmp_upload.csv")
+
+    try:
+        with st.spinner("Analisi CSV..."):
+            if using_sample and sample_bytes is not None:
+                tmp_path.write_bytes(sample_bytes)
+            else:
+                upload_bytes = upload.getvalue()
+                if not upload_bytes:
+                    raise ValueError("Il file caricato è vuoto.")
+                tmp_path.write_bytes(upload_bytes)
+                upload.seek(0)
+
+            if not tmp_path.exists() or tmp_path.stat().st_size == 0:
+                raise ValueError("Il file caricato è vuoto o non è stato salvato correttamente.")
+
+            meta = analyze_csv(str(tmp_path))
+            df = load_csv(
+                str(tmp_path),
+                encoding=meta.get("encoding"),
+                delimiter=meta.get("delimiter"),
+                header=meta.get("header"),
+            )
+    except pd.errors.EmptyDataError:
+        st.error(
+            "Il file sembra vuoto (nessuna colonna rilevata). Verifica l'esportazione e riprova."
+        )
+        return
+    except ValueError as ve:
+        st.error(str(ve))
+        return
+    except Exception as exc:
+        st.error(f"Errore nel parsing del CSV: {exc}")
+        return
+
+    if using_sample:
+        st.success(f"Sample '{sample_name}' caricato.")
+    else:
+        st.success("File caricato.")
     n_preview = st.slider("Righe di anteprima", 5, 50, 10)
     _dataframe(df.head(n_preview))
     total_rows = len(df)
