@@ -19,7 +19,11 @@ def format_number_locale(
     sign = "-" if value < 0 else ""
     value = abs(value)
     fmt = f"{value:.{decimals}f}"
-    int_part, frac_part = fmt.split(".")
+    if decimals == 0:
+        int_part = fmt
+        frac_part = ""
+    else:
+        int_part, frac_part = fmt.split(".")
     chunks = []
     while int_part:
         chunks.append(int_part[-3:])

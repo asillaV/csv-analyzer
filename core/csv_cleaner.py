@@ -120,10 +120,10 @@ def clean_dataframe(
 
     for column in df_input.columns:
         series = df_input[column]
-        series_str = series.astype("string")
+        series_str = series.astype("string", copy=False)
         total = len(series_str)
 
-        candidate_mask = series_str.fillna("").str.contains(NUMERIC_TOKEN_RE, regex=True)
+        candidate_mask = series_str.str.contains(NUMERIC_TOKEN_RE, regex=True, na=False)
         candidate_count = int(candidate_mask.sum())
         if candidate_count == 0:
             columns_report[column] = ColumnReport(
@@ -138,9 +138,7 @@ def clean_dataframe(
             )
             continue
 
-        numeric_series = _convert_series(
-            series_str, suggestion.decimal, suggestion.thousands
-        )
+        numeric_series = _convert_series(series_str, suggestion.decimal, suggestion.thousands)
         converted_mask = candidate_mask & numeric_series.notna()
         converted_count = int(converted_mask.sum())
         non_numeric_count = candidate_count - converted_count
@@ -237,7 +235,7 @@ def suggest_number_format(
 def _collect_samples(df: pd.DataFrame, max_samples: int) -> List[str]:
     samples: List[str] = []
     for column in df.columns:
-        series = df[column].astype("string")
+        series = df[column].astype("string", copy=False)
         for value in series.head(max_samples * 4):
             if value is None or pd.isna(value):
                 continue
@@ -265,11 +263,37 @@ def _score_combination(samples: Sequence[str], decimal: str, thousands: Optional
 def _convert_series(
     series: pd.Series, decimal: Optional[str], thousands: Optional[str]
 ) -> pd.Series:
-    normalized_values = [
-        _normalize_value(value, decimal, thousands) for value in series.to_numpy()
-    ]
-    numeric_series = pd.to_numeric(normalized_values, errors="coerce")
-    return pd.Series(numeric_series, index=series.index, dtype="float64")
+    """
+    Converte una Series di stringhe in numerici usando operazioni vettoriali.
+    """
+    s = series.astype("string", copy=False)
+    s = s.str.strip()
+    if s.isna().all():
+        return pd.Series(pd.NA, index=series.index, dtype="Float64")
+
+    s = s.str.replace("\u202F", " ", regex=False).str.replace("\u2009", " ", regex=False)
+    s = s.str.replace(PREFIX_SYMBOLS_RE, "", regex=True)
+
+    if TRAILING_SYMBOLS:
+        trailing_pattern = "(" + "|".join(re.escape(sym) for sym in TRAILING_SYMBOLS) + r")+?$"
+        s = s.str.replace(trailing_pattern, "", regex=True).str.strip()
+
+    if thousands:
+        if thousands.strip() == "":
+            s = s.str.replace(r"\s+", "", regex=True)
+        else:
+            s = s.str.replace(re.escape(thousands), "", regex=True)
+
+    s = s.str.replace(" ", "", regex=False)
+
+    if decimal and decimal != ".":
+        s = s.str.replace(decimal, ".", regex=False)
+
+    s = s.str.replace(r"[^0-9+\-\.eE]", "", regex=True)
+    s = s.replace({"": pd.NA, "+": pd.NA, "-": pd.NA, "+.": pd.NA, "-.": pd.NA, ".": pd.NA})
+
+    numeric = pd.to_numeric(s, errors="coerce")
+    return numeric.astype("Float64")
 
 
 def _normalize_value(

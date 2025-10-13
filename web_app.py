@@ -1,9 +1,10 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import inspect
 from pathlib import Path
+import hashlib
 from types import SimpleNamespace
-from typing import Any, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -62,33 +63,21 @@ SAMPLE_CSV_PATH = Path("assets/sample_timeseries.csv")
 
 
 def _reset_all_settings() -> None:
-    """Resetta tutti i controlli e gli output, senza toccare il file caricato.
-
-    Strategia: rimuove le chiavi di sessione dei widget (così tornano ai default)
-    e gli artefatti di output/plot. Poi richiede un rerun per applicare subito.
-    """
-    # Pulisci chiavi note
+    """Reset widgets/output while keeping the current file and cached data."""
     for k in list(RESETTABLE_KEYS):
         st.session_state.pop(k, None)
 
-    # Pulisci chiavi per-plot del report visivo
     for key in list(st.session_state.keys()):
         if isinstance(key, str) and key.startswith("vis_report_"):
             st.session_state.pop(key, None)
 
-    # Pulisci flag interni e output generati
     st.session_state.pop("_plots_ready", None)
     st.session_state.pop("_generated_report", None)
     st.session_state.pop("_generated_report_error", None)
     st.session_state.pop("_generated_visual_report", None)
     st.session_state.pop("_generated_visual_report_error", None)
 
-    # Bump del nonce del form controlli per resettare i widget senza keys
     st.session_state["_controls_nonce"] = st.session_state.get("_controls_nonce", 0) + 1
-
-    # Non tocchiamo _last_uploaded_file_id o lo stato dell'uploader
-    # Rerun per applicare subito i default
-    st.rerun()
 
 # ---------------------- Streamlit compatibility helpers ---------------------- #
 def _supports_kwarg(func: Any, name: str) -> bool:
@@ -230,6 +219,49 @@ def _cleaning_stats_table(report: CleaningReport) -> pd.DataFrame:
     )
 
 
+
+
+def _fmt_csv_token(token: Optional[str]) -> str:
+    if token is None:
+        return "auto"
+    if token == "	":
+        return "\t"
+    if token == " ":
+        return "' '"
+    if token == "":
+        return "vuoto"
+    return token
+
+
+def _cleaning_stats_table(report: CleaningReport) -> pd.DataFrame:
+    rows = []
+    for name, stats in report.columns.items():
+        percent_non_numeric = (
+            stats.non_numeric / stats.candidate_numeric if stats.candidate_numeric else 0.0
+        )
+        rows.append(
+            {
+                "Colonna": name,
+                "Valori candidati": stats.candidate_numeric,
+                "Convertiti": stats.converted,
+                "Non numerici": stats.non_numeric,
+                "% non numerici": f"{percent_non_numeric:.1%}" if stats.candidate_numeric else "n.d.",
+                "Correzione applicata": "si" if stats.applied else "no",
+            }
+        )
+    if rows:
+        return pd.DataFrame(rows)
+    return pd.DataFrame(
+        columns=[
+            "Colonna",
+            "Valori candidati",
+            "Convertiti",
+            "Non numerici",
+            "% non numerici",
+            "Correzione applicata",
+        ]
+    )
+
 def _make_time_series(df: pd.DataFrame, x_col: Optional[str], y_col: str) -> Tuple[pd.Series, Optional[pd.Series]]:
     y = pd.to_numeric(df[y_col], errors="coerce")
     y.name = y_col
@@ -370,6 +402,11 @@ def _reset_generated_reports_marker(current_file: Optional[Any]) -> None:
         st.session_state.pop("_visual_report_prev_selection", None)
         st.session_state.pop("_visual_report_last_default_x_label", None)
         st.session_state.pop("_plots_ready", None)
+        st.session_state.pop("_cached_df", None)
+        st.session_state.pop("_cached_meta", None)
+        st.session_state.pop("_cached_cleaning_report", None)
+        st.session_state.pop("_cached_file_sig", None)
+        st.session_state.pop("_cached_apply_cleaning", None)
         for key in list(st.session_state.keys()):
             if isinstance(key, str) and key.startswith("vis_report_"):
                 st.session_state.pop(key, None)
@@ -526,30 +563,58 @@ def main():
 
     tmp_path = Path("tmp_upload.csv")
     cleaning_report: Optional[CleaningReport] = None
+    meta: Dict[str, Any]
+
+    if using_sample:
+        if sample_bytes is None:
+            st.error("Sample non disponibile.")
+            return
+        file_bytes = sample_bytes
+    else:
+        upload_bytes = upload.getvalue()
+        if not upload_bytes:
+            st.error("Il file caricato è vuoto.")
+            return
+        file_bytes = upload_bytes
+        upload.seek(0)
+
+    file_sig = (len(file_bytes), hashlib.sha1(file_bytes).hexdigest())
+
+    cached_df = st.session_state.get("_cached_df")
+    cached_report = st.session_state.get("_cached_cleaning_report")
+    cached_meta = st.session_state.get("_cached_meta")
+    cache_hit = (
+        st.session_state.get("_cached_file_sig") == file_sig
+        and st.session_state.get("_cached_apply_cleaning") == apply_cleaning
+        and cached_df is not None
+        and cached_report is not None
+        and cached_meta is not None
+    )
 
     try:
         with st.spinner("Analisi CSV..."):
-            if using_sample and sample_bytes is not None:
-                tmp_path.write_bytes(sample_bytes)
+            if cache_hit:
+                df = cached_df  # type: ignore[assignment]
+                cleaning_report = cached_report  # type: ignore[assignment]
+                meta = dict(cached_meta)  # type: ignore[arg-type]
+                if not tmp_path.exists():
+                    tmp_path.write_bytes(file_bytes)
             else:
-                upload_bytes = upload.getvalue()
-                if not upload_bytes:
-                    raise ValueError("Il file caricato è vuoto.")
-                tmp_path.write_bytes(upload_bytes)
-                upload.seek(0)
-
-            if not tmp_path.exists() or tmp_path.stat().st_size == 0:
-                raise ValueError("Il file caricato è vuoto o non è stato salvato correttamente.")
-
-            meta = analyze_csv(str(tmp_path))
-            df, cleaning_report = load_csv(
-                str(tmp_path),
-                encoding=meta.get("encoding"),
-                delimiter=meta.get("delimiter"),
-                header=meta.get("header"),
-                apply_cleaning=apply_cleaning,
-                return_details=True,
-            )
+                tmp_path.write_bytes(file_bytes)
+                meta = analyze_csv(str(tmp_path))
+                df, cleaning_report = load_csv(
+                    str(tmp_path),
+                    encoding=meta.get("encoding"),
+                    delimiter=meta.get("delimiter"),
+                    header=meta.get("header"),
+                    apply_cleaning=apply_cleaning,
+                    return_details=True,
+                )
+                st.session_state["_cached_df"] = df
+                st.session_state["_cached_cleaning_report"] = cleaning_report
+                st.session_state["_cached_meta"] = dict(meta)
+                st.session_state["_cached_file_sig"] = file_sig
+                st.session_state["_cached_apply_cleaning"] = apply_cleaning
     except pd.errors.EmptyDataError:
         st.error(
             "Il file sembra vuoto (nessuna colonna rilevata). Verifica l'esportazione e riprova."
@@ -567,6 +632,9 @@ def main():
         return
 
     meta["cleaning"] = cleaning_report.to_dict()
+    st.session_state["_cached_meta"] = dict(meta)
+    st.session_state["_cached_file_sig"] = file_sig
+    st.session_state["_cached_apply_cleaning"] = apply_cleaning
 
     if using_sample:
         st.success(f"Sample '{sample_name}' caricato.")
@@ -1188,3 +1256,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
