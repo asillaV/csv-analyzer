@@ -17,6 +17,7 @@ from tkinter.scrolledtext import ScrolledText
 
 # Core del progetto
 from core.analyzer import analyze_csv
+from core.csv_cleaner import CleaningReport
 from core.loader import load_csv
 from core.report_manager import ReportManager
 from core.signal_tools import (
@@ -158,6 +159,7 @@ class DesktopAppTk(tk.Tk):
         # Stato
         self.df: Optional[pd.DataFrame] = None
         self.columns: List[str] = []
+        self.cleaning_report: Optional[CleaningReport] = None
 
         # --- Layout base
         self.columnconfigure(0, weight=0)
@@ -311,12 +313,22 @@ class DesktopAppTk(tk.Tk):
             return
         try:
             meta = analyze_csv(path)
-            self.df = load_csv(path, encoding=meta.get("encoding"),
-                                     delimiter=meta.get("delimiter"),
-                                     header=meta.get("header"))
+            self.df, self.cleaning_report = load_csv(
+                path,
+                encoding=meta.get("encoding"),
+                delimiter=meta.get("delimiter"),
+                header=meta.get("header"),
+                return_details=True,
+            )
             self.columns = meta.get("columns", list(self.df.columns))
             self._refresh_columns()
             self._append_log(f"CSV caricato: {len(self.df)} righe, {len(self.columns)} colonne.")
+            if self.cleaning_report:
+                suggestion = self.cleaning_report.suggestion
+                self._append_log(
+                    f"Formato numerico: decimale={suggestion.decimal}, migliaia={suggestion.thousands or 'nessuno'} "
+                    f"(conf. {suggestion.confidence:.0%})"
+                )
         except Exception as e:
             messagebox.showerror("Errore", f"Analisi/caricamento fallito: {e}")
 

@@ -12,6 +12,7 @@ import streamlit as st
 
 from core.analyzer import analyze_csv
 from core.loader import load_csv
+from core.csv_cleaner import CleaningReport
 from core.report_manager import ReportManager
 from core.visual_report_manager import VisualPlotSpec, VisualReportManager
 from core.signal_tools import (
@@ -185,6 +186,48 @@ def _parse_range_x(min_s: str, max_s: str, x: pd.Series | pd.Index) -> Optional[
         # prova come numerico
         xv = pd.to_numeric(pd.Series(x), errors="coerce")
         return _parse_range_num(min_s, max_s, xv)
+
+
+def _fmt_csv_token(token: Optional[str]) -> str:
+    if token is None:
+        return "auto"
+    if token == "\t":
+        return "\\t"
+    if token == " ":
+        return "' '"
+    if token == "":
+        return "vuoto"
+    return token
+
+
+def _cleaning_stats_table(report: CleaningReport) -> pd.DataFrame:
+    rows = []
+    for name, stats in report.columns.items():
+        percent_non_numeric = (
+            stats.non_numeric / stats.candidate_numeric if stats.candidate_numeric else 0.0
+        )
+        rows.append(
+            {
+                "Colonna": name,
+                "Valori candidati": stats.candidate_numeric,
+                "Convertiti": stats.converted,
+                "Non numerici": stats.non_numeric,
+                "% non numerici": f"{percent_non_numeric:.1%}" if stats.candidate_numeric else "—",
+                "Correzione applicata": "sì" if stats.applied else "no",
+            }
+        )
+    if rows:
+        return pd.DataFrame(rows)
+    return pd.DataFrame(
+        columns=[
+            "Colonna",
+            "Valori candidati",
+            "Convertiti",
+            "Non numerici",
+            "% non numerici",
+            "Correzione applicata",
+        ]
+    )
 
 
 def _make_time_series(df: pd.DataFrame, x_col: Optional[str], y_col: str) -> Tuple[pd.Series, Optional[pd.Series]]:
@@ -474,7 +517,15 @@ def main():
 
     using_sample = upload is None
 
+    apply_cleaning = st.checkbox(
+        "Applica correzione suggerita",
+        value=True,
+        key="_apply_cleaning",
+        help="Rimuove separatori migliaia/decimali incoerenti e converte le colonne numeriche.",
+    )
+
     tmp_path = Path("tmp_upload.csv")
+    cleaning_report: Optional[CleaningReport] = None
 
     try:
         with st.spinner("Analisi CSV..."):
@@ -491,11 +542,13 @@ def main():
                 raise ValueError("Il file caricato è vuoto o non è stato salvato correttamente.")
 
             meta = analyze_csv(str(tmp_path))
-            df = load_csv(
+            df, cleaning_report = load_csv(
                 str(tmp_path),
                 encoding=meta.get("encoding"),
                 delimiter=meta.get("delimiter"),
                 header=meta.get("header"),
+                apply_cleaning=apply_cleaning,
+                return_details=True,
             )
     except pd.errors.EmptyDataError:
         st.error(
@@ -509,10 +562,71 @@ def main():
         st.error(f"Errore nel parsing del CSV: {exc}")
         return
 
+    if cleaning_report is None:
+        st.error("Impossibile generare il report di sanificazione del CSV.")
+        return
+
+    meta["cleaning"] = cleaning_report.to_dict()
+
     if using_sample:
         st.success(f"Sample '{sample_name}' caricato.")
     else:
         st.success("File caricato.")
+
+    with st.container():
+        suggestion = cleaning_report.suggestion
+        info_cols = st.columns(4)
+        info_cols[0].markdown(
+            f"**Encoding**<br/>{meta.get('encoding', 'utf-8')}",
+            unsafe_allow_html=True,
+        )
+        info_cols[1].markdown(
+            f"**Delimiter**<br/>{_fmt_csv_token(meta.get('delimiter'))}",
+            unsafe_allow_html=True,
+        )
+        info_cols[2].markdown(
+            f"**Decimal**<br/>{_fmt_csv_token(suggestion.decimal)}",
+            unsafe_allow_html=True,
+        )
+        info_cols[3].markdown(
+            f"**Migliaia**<br/>{_fmt_csv_token(suggestion.thousands)}",
+            unsafe_allow_html=True,
+        )
+        st.caption(
+            f"Correzione automatica: {'attiva' if apply_cleaning else 'disattivata'} · "
+            f"Confidenza formato: {suggestion.confidence:.0%} (campione={suggestion.sample_size})"
+        )
+
+        if cleaning_report.warnings:
+            for warn in cleaning_report.warnings:
+                st.warning(warn)
+
+        stats_df = _cleaning_stats_table(cleaning_report)
+        if not stats_df.empty:
+            st.markdown("**Qualità colonne numeriche**")
+            _dataframe(stats_df)
+        else:
+            st.caption("Nessuna colonna numerica rilevata.")
+
+        if cleaning_report.rows_all_nan_after_clean:
+            st.info(
+                "Righe con tutte le colonne numeriche a NaN dopo la correzione: "
+                f"{len(cleaning_report.rows_all_nan_after_clean)} "
+                f"(prime: {cleaning_report.rows_all_nan_after_clean[:5]})"
+            )
+
+        raw_name = getattr(current_file, "name", tmp_path.name)
+        try:
+            raw_bytes = tmp_path.read_bytes()
+            st.download_button(
+                "Scarica CSV originale",
+                data=raw_bytes,
+                file_name=raw_name,
+                mime="text/csv",
+            )
+        except Exception:
+            st.caption("Impossibile preparare il download del CSV originale.")
+
     n_preview = st.slider("Righe di anteprima", 5, 50, 10)
     _dataframe(df.head(n_preview))
     total_rows = len(df)
