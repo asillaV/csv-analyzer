@@ -25,6 +25,7 @@ from textual.widgets import (
 )
 
 from core.analyzer import analyze_csv
+from core.csv_cleaner import CleaningReport
 from core.loader import load_csv
 from core.report_manager import ReportManager
 from core.signal_tools import (
@@ -103,6 +104,7 @@ class CSVAnalyzerApp(App):
         self.columns: List[str] = []
         self.x_col: Optional[str] = None
         self.y_cols: List[str] = []  # ricalcolata dai checkbox
+        self.cleaning_report: Optional[CleaningReport] = None
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -248,12 +250,25 @@ class CSVAnalyzerApp(App):
             self.notify("Percorso vuoto.", severity="warning"); return
         try:
             self.meta = analyze_csv(path)
-            self.df = load_csv(path, encoding=self.meta.get("encoding"),
-                                     delimiter=self.meta.get("delimiter"),
-                                     header=self.meta.get("header"))
+            self.df, self.cleaning_report = load_csv(
+                path,
+                encoding=self.meta.get("encoding"),
+                delimiter=self.meta.get("delimiter"),
+                header=self.meta.get("header"),
+                return_details=True,
+            )
+            if self.cleaning_report:
+                self.meta["cleaning"] = self.cleaning_report.to_dict()
             self.columns = self.meta.get("columns", list(self.df.columns))
             self._refresh_columns()
-            self.notify("CSV caricato.", severity="information")
+            if self.cleaning_report:
+                suggestion = self.cleaning_report.suggestion
+                self.notify(
+                    f"CSV caricato (decimale={suggestion.decimal}, migliaia={suggestion.thousands or 'nessuno'}).",
+                    severity="information",
+                )
+            else:
+                self.notify("CSV caricato.", severity="information")
         except Exception as e:
             self.notify(f"Errore analisi/caricamento: {e}", severity="error")
 
