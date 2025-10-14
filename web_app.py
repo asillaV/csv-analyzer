@@ -185,52 +185,8 @@ def _parse_range_x(min_s: str, max_s: str, x: pd.Series | pd.Index) -> Optional[
 def _fmt_csv_token(token: Optional[str]) -> str:
     if token is None:
         return "auto"
-    if token == "\t":
+    if token == "\t" or token == "	":
         return "\\t"
-    if token == " ":
-        return "' '"
-    if token == "":
-        return "vuoto"
-    return token
-
-
-def _cleaning_stats_table(report: CleaningReport) -> pd.DataFrame:
-    rows = []
-    for name, stats in report.columns.items():
-        percent_non_numeric = (
-            stats.non_numeric / stats.candidate_numeric if stats.candidate_numeric else 0.0
-        )
-        rows.append(
-            {
-                "Colonna": name,
-                "Valori candidati": stats.candidate_numeric,
-                "Convertiti": stats.converted,
-                "Non numerici": stats.non_numeric,
-                "% non numerici": f"{percent_non_numeric:.1%}" if stats.candidate_numeric else "—",
-                "Correzione applicata": "sì" if stats.applied else "no",
-            }
-        )
-    if rows:
-        return pd.DataFrame(rows)
-    return pd.DataFrame(
-        columns=[
-            "Colonna",
-            "Valori candidati",
-            "Convertiti",
-            "Non numerici",
-            "% non numerici",
-            "Correzione applicata",
-        ]
-    )
-
-
-
-
-def _fmt_csv_token(token: Optional[str]) -> str:
-    if token is None:
-        return "auto"
-    if token == "	":
-        return "\t"
     if token == " ":
         return "' '"
     if token == "":
@@ -896,16 +852,15 @@ def main():
     else:
         xmin_idx = _to_float_or_none(x_min_txt)
         xmax_idx = _to_float_or_none(x_max_txt)
+        default_min = 0.0
+        default_max = float(len(df) - 1) if len(df) > 0 else 0.0
         if xmin_idx is not None or xmax_idx is not None:
-            # Usa l'indice numerico implicito quando manca una colonna X esplicita
-            default_min = 0.0
-            default_max = float(len(df) - 1) if len(df) > 0 else 0.0
-        if xmin_idx is None:
-            xmin_idx = default_min
-        if xmax_idx is None:
-            xmax_idx = default_max
-        if xmin_idx != xmax_idx:
-            xrange = (xmin_idx, xmax_idx)
+            if xmin_idx is None:
+                xmin_idx = default_min
+            if xmax_idx is None:
+                xmax_idx = default_max
+            if xmin_idx != xmax_idx:
+                xrange = (xmin_idx, xmax_idx)
 
     quality_mode = st.session_state.get(quality_key, "Alta fedeltà")
     performance_enabled = quality_mode == "Prestazioni"
