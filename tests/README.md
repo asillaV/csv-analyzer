@@ -94,3 +94,8 @@ Test numerici usano `pytest.approx()` con tolleranze ragionevoli:
 - `@pytest.mark.integration` - Test integrazione
 - `@pytest.mark.unit` - Test unitari
 - `@pytest.mark.synthetic` - Test con segnali sintetici
+
+### Modalit? Prestazioni / Alta Fedelt?
+- Switch presente nelle UI (web, Textual, desktop Tk) per attivare il downsampling LTTB a ~10k punti per traccia.
+- Di default viene abilitato sopra le 100k righe; la modalit? Alta fedelt? mostra tutti i campioni.
+- FFT e filtri continuano a usare i dati originali, il downsampling ? solo per il rendering Plotly.
