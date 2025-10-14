@@ -76,11 +76,19 @@ def _reset_all_settings() -> None:
         if isinstance(key, str) and key.startswith("vis_report_"):
             st.session_state.pop(key, None)
 
+    # Reset plot and report outputs
     st.session_state.pop("_plots_ready", None)
     st.session_state.pop("_generated_report", None)
     st.session_state.pop("_generated_report_error", None)
     st.session_state.pop("_generated_visual_report", None)
     st.session_state.pop("_generated_visual_report_error", None)
+
+    # Reset visual report tracking state
+    st.session_state.pop("_visual_report_prev_selection", None)
+    st.session_state.pop("_visual_report_last_default_x_label", None)
+
+    # Reset quality mode to default
+    st.session_state.pop("_quality_file_sig", None)
 
     st.session_state["_controls_nonce"] = st.session_state.get("_controls_nonce", 0) + 1
 
