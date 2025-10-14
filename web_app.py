@@ -852,16 +852,15 @@ def main():
     else:
         xmin_idx = _to_float_or_none(x_min_txt)
         xmax_idx = _to_float_or_none(x_max_txt)
+        default_min = 0.0
+        default_max = float(len(df) - 1) if len(df) > 0 else 0.0
         if xmin_idx is not None or xmax_idx is not None:
-            # Usa l'indice numerico implicito quando manca una colonna X esplicita
-            default_min = 0.0
-            default_max = float(len(df) - 1) if len(df) > 0 else 0.0
-        if xmin_idx is None:
-            xmin_idx = default_min
-        if xmax_idx is None:
-            xmax_idx = default_max
-        if xmin_idx != xmax_idx:
-            xrange = (xmin_idx, xmax_idx)
+            if xmin_idx is None:
+                xmin_idx = default_min
+            if xmax_idx is None:
+                xmax_idx = default_max
+            if xmin_idx != xmax_idx:
+                xrange = (xmin_idx, xmax_idx)
 
     quality_mode = st.session_state.get(quality_key, "Alta fedeltà")
     performance_enabled = quality_mode == "Prestazioni"
