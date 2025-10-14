@@ -66,6 +66,118 @@ PERFORMANCE_MAX_POINTS = 10_000
 PERFORMANCE_METHOD = "lttb"
 SAMPLE_CSV_PATH = Path("assets/sample_timeseries.csv")
 
+# Cache limits
+MAX_FILTER_CACHE_SIZE = 32
+MAX_FFT_CACHE_SIZE = 16
+
+
+# ---------------------- Cache helpers (Issue #35) ---------------------- #
+def _init_result_caches() -> None:
+    """Initialize cache dictionaries in session state if not present."""
+    if "_filter_cache" not in st.session_state:
+        st.session_state["_filter_cache"] = {}
+    if "_fft_cache" not in st.session_state:
+        st.session_state["_fft_cache"] = {}
+
+
+def _get_filter_cache_key(
+    column: str, file_sig: Tuple, fspec: FilterSpec, fs: Optional[float], fs_source: Optional[str]
+) -> Tuple:
+    """Generate hashable cache key for filter results."""
+    from dataclasses import astuple
+    # Include fs and fs_source in key to invalidate when sampling frequency or source changes
+    return (column, file_sig, astuple(fspec), fs, fs_source)
+
+
+def _get_fft_cache_key(
+    column: str, file_sig: Tuple, is_filtered: bool, fftspec: FFTSpec, fs: float, fs_source: Optional[str]
+) -> Tuple:
+    """Generate hashable cache key for FFT results."""
+    from dataclasses import astuple
+    # Include fs_source to invalidate when fs changes from estimated to manual
+    return (column, file_sig, is_filtered, astuple(fftspec), fs, fs_source)
+
+
+def _get_cached_filter(key: Tuple) -> Optional[pd.Series]:
+    """Retrieve cached filter result."""
+    return st.session_state.get("_filter_cache", {}).get(key)
+
+
+def _cache_filter_result(key: Tuple, result: pd.Series) -> None:
+    """Store filter result with LRU eviction."""
+    cache = st.session_state.setdefault("_filter_cache", {})
+    if len(cache) >= MAX_FILTER_CACHE_SIZE:
+        # Simple LRU: remove oldest (first) entry
+        oldest_key = next(iter(cache))
+        cache.pop(oldest_key)
+    cache[key] = result.copy()  # Store copy to avoid reference issues
+
+
+def _get_cached_fft(key: Tuple) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+    """Retrieve cached FFT result."""
+    return st.session_state.get("_fft_cache", {}).get(key)
+
+
+def _cache_fft_result(key: Tuple, freqs: np.ndarray, amp: np.ndarray) -> None:
+    """Store FFT result with LRU eviction."""
+    cache = st.session_state.setdefault("_fft_cache", {})
+    if len(cache) >= MAX_FFT_CACHE_SIZE:
+        # Simple LRU: remove oldest (first) entry
+        oldest_key = next(iter(cache))
+        cache.pop(oldest_key)
+    cache[key] = (freqs.copy(), amp.copy())  # Store copies
+
+
+def _invalidate_result_caches() -> None:
+    """Clear all filter and FFT caches (called on file change)."""
+    st.session_state.pop("_filter_cache", None)
+    st.session_state.pop("_fft_cache", None)
+
+
+def _apply_filter_cached(
+    series: pd.Series,
+    x_series: Optional[pd.Series],
+    fspec: FilterSpec,
+    fs_value: Optional[float],
+    fs_source: Optional[str],
+    file_sig: Tuple,
+    column_name: str,
+) -> Optional[pd.Series]:
+    """Apply filter with caching. Returns filtered series or None if filter fails."""
+    _init_result_caches()
+    cache_key = _get_filter_cache_key(column_name, file_sig, fspec, fs_value, fs_source)
+    cached = _get_cached_filter(cache_key)
+    if cached is not None:
+        return cached
+    # Cache miss: compute filter
+    try:
+        filtered, _ = apply_filter(series, x_series, fspec, fs_override=fs_value)
+        _cache_filter_result(cache_key, filtered)
+        return filtered
+    except Exception:
+        return None
+
+
+def _compute_fft_cached(
+    series: pd.Series,
+    fs_value: float,
+    fs_source: Optional[str],
+    fftspec: FFTSpec,
+    file_sig: Tuple,
+    column_name: str,
+    is_filtered: bool,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Compute FFT with caching. Returns (freqs, amp) arrays."""
+    _init_result_caches()
+    cache_key = _get_fft_cache_key(column_name, file_sig, is_filtered, fftspec, fs_value, fs_source)
+    cached = _get_cached_fft(cache_key)
+    if cached is not None:
+        return cached
+    # Cache miss: compute FFT
+    freqs, amp = compute_fft(series, fs_value, detrend=fftspec.detrend, window=fftspec.window)
+    _cache_fft_result(cache_key, freqs, amp)
+    return freqs, amp
+
 
 def _reset_all_settings() -> None:
     """Reset widgets/output while keeping the current file and cached data."""
@@ -376,6 +488,8 @@ def _reset_generated_reports_marker(current_file: Optional[Any]) -> None:
         st.session_state.pop("_cached_cleaning_report", None)
         st.session_state.pop("_cached_file_sig", None)
         st.session_state.pop("_cached_apply_cleaning", None)
+        # Issue #35: Invalidate filter/FFT caches when file changes
+        _invalidate_result_caches()
         for key in list(st.session_state.keys()):
             if isinstance(key, str) and key.startswith("vis_report_"):
                 st.session_state.pop(key, None)
@@ -927,12 +1041,12 @@ def main():
                 y_plot = series
             else:
                 if fspec.enabled:
-                    try:
-                        y_filt, _ = apply_filter(series, x_ser, fspec, fs_override=fs_value)
-                        y_plot = y_filt
-                    except Exception as e:
-                        st.warning(f"Filtro non applicato a {yname}: {e}")
+                    y_filt = _apply_filter_cached(series, x_ser, fspec, fs_value, fs_info.source, file_sig, yname)
+                    if y_filt is None:
+                        st.warning(f"Filtro non applicato a {yname}: errore nel calcolo.")
                         y_plot = series
+                    else:
+                        y_plot = y_filt
                 else:
                     y_plot = series
 
@@ -994,10 +1108,7 @@ def main():
                     continue
                 y_filt = None
                 if fspec.enabled:
-                    try:
-                        y_filt, _ = apply_filter(series, x_ser, fspec, fs_override=fs_value)
-                    except Exception:
-                        y_filt = None
+                    y_filt = _apply_filter_cached(series, x_ser, fspec, fs_value, fs_info.source, file_sig, yname)
                 y_fft = y_filt if (fspec.enabled and y_filt is not None and fft_use == "Filtrato (se attivo)") else series
                 if not fs_value or fs_value <= 0:
                     st.warning(f"FFT non calcolata per {yname}: fs non disponibile.")
@@ -1005,7 +1116,8 @@ def main():
                     detail = "; ".join(fs_info.warnings) if fs_info.warnings else "campionamento irregolare."
                     st.warning(f"FFT non calcolata per {yname}: {detail}")
                 else:
-                    freqs, amp = compute_fft(y_fft, fs_value, detrend=fftspec.detrend)
+                    is_filt = fspec.enabled and y_filt is not None and fft_use == "Filtrato (se attivo)"
+                    freqs, amp = _compute_fft_cached(y_fft, fs_value, fs_info.source, fftspec, file_sig, yname, is_filt)
                     if freqs.size == 0:
                         st.info(f"FFT non calcolabile per {yname} (serie troppo corta o parametri non validi).")
                     else:
@@ -1033,12 +1145,12 @@ def main():
                 y_plot = series
             else:
                 if fspec.enabled:
-                    try:
-                        y_filt, _ = apply_filter(series, x_ser, fspec, fs_override=fs_value)
-                        y_plot = y_filt
-                    except Exception as e:
-                        host.warning(f"Filtro non applicato a {yname}: {e}")
+                    y_filt = _apply_filter_cached(series, x_ser, fspec, fs_value, fs_info.source, file_sig, yname)
+                    if y_filt is None:
+                        host.warning(f"Filtro non applicato a {yname}: errore nel calcolo.")
                         y_plot = series
+                    else:
+                        y_plot = y_filt
                 else:
                     y_plot = series
 
@@ -1081,7 +1193,8 @@ def main():
                     detail = "; ".join(fs_info.warnings) if fs_info.warnings else "campionamento irregolare."
                     host.warning(f"FFT non calcolata per {yname}: {detail}")
                 else:
-                    freqs, amp = compute_fft(y_fft, fs_value, detrend=fftspec.detrend)
+                    is_filt = fspec.enabled and y_filt is not None and fft_use == "Filtrato (se attivo)"
+                    freqs, amp = _compute_fft_cached(y_fft, fs_value, fs_info.source, fftspec, file_sig, yname, is_filt)
                     if freqs.size == 0:
                         host.info(f"FFT non calcolabile per {yname} (serie troppo corta o parametri non validi).")
                     else:
@@ -1107,12 +1220,12 @@ def main():
                 y_plot = series
             else:
                 if fspec.enabled:
-                    try:
-                        y_filt, _ = apply_filter(series, x_ser, fspec, fs_override=fs_value)
-                        y_plot = y_filt
-                    except Exception as e:
-                        st.warning(f"Filtro non applicato a {yname}: {e}")
+                    y_filt = _apply_filter_cached(series, x_ser, fspec, fs_value, fs_info.source, file_sig, yname)
+                    if y_filt is None:
+                        st.warning(f"Filtro non applicato a {yname}: errore nel calcolo.")
                         y_plot = series
+                    else:
+                        y_plot = y_filt
                 else:
                     y_plot = series
 
@@ -1155,7 +1268,8 @@ def main():
                     detail = "; ".join(fs_info.warnings) if fs_info.warnings else "campionamento irregolare."
                     st.warning(f"FFT non calcolata per {yname}: {detail}")
                 else:
-                    freqs, amp = compute_fft(y_fft, fs_value, detrend=fftspec.detrend)
+                    is_filt = fspec.enabled and y_filt is not None and fft_use == "Filtrato (se attivo)"
+                    freqs, amp = _compute_fft_cached(y_fft, fs_value, fs_info.source, fftspec, file_sig, yname, is_filt)
                     if freqs.size == 0:
                         st.info(f"FFT non calcolabile per {yname} (serie troppo corta o parametri non validi).")
                     else:
