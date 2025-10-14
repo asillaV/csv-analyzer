@@ -123,8 +123,11 @@ def clean_dataframe(
         series_str = series.astype("string", copy=False)
         total = len(series_str)
 
-        candidate_mask = series_str.str.contains(NUMERIC_TOKEN_RE, regex=True, na=False)
+        series_filled = series_str.fillna("")
+        stripped = series_filled.str.strip()
+        candidate_mask = stripped != ""
         candidate_count = int(candidate_mask.sum())
+
         if candidate_count == 0:
             columns_report[column] = ColumnReport(
                 total=total,
@@ -139,20 +142,26 @@ def clean_dataframe(
             continue
 
         numeric_series = _convert_series(series_str, suggestion.decimal, suggestion.thousands)
-        converted_mask = candidate_mask & numeric_series.notna()
+        lower_values = stripped.str.lower()
+        special_nan_mask = lower_values.isin({"nan", "inf", "+inf", "-inf", "infinity"})
+        converted_mask = candidate_mask & (numeric_series.notna() | special_nan_mask)
         converted_count = int(converted_mask.sum())
-        non_numeric_count = candidate_count - converted_count
+        non_numeric_count = int((candidate_mask & ~converted_mask).sum())
         conversion_rate = converted_count / candidate_count if candidate_count else 0.0
 
         examples = _collect_examples(
             series_str, candidate_mask, converted_mask, limit=MAX_NON_NUMERIC_EXAMPLES
         )
 
-        should_apply = (
-            apply
-            and candidate_count >= MIN_CANDIDATE_VALUES
-            and conversion_rate >= MIN_CONVERSION_RATE
-        )
+        should_apply = False
+        if apply and candidate_count > 0:
+            if converted_count == candidate_count:
+                should_apply = True
+            elif (
+                candidate_count >= MIN_CANDIDATE_VALUES
+                and conversion_rate >= MIN_CONVERSION_RATE
+            ):
+                should_apply = True
 
         if should_apply:
             numeric_columns.append(column)
@@ -211,19 +220,20 @@ def suggest_number_format(
 
     best_decimal: Optional[str] = None
     best_thousands: Optional[str] = None
-    best_score = -1
+    best_metrics: Optional[Tuple[int, int, int]] = None
 
     for dec in DECIMAL_CANDIDATES:
         for thou in THOUSANDS_CANDIDATES:
             if thou is not None and thou == dec:
                 continue
-            score = _score_combination(samples, dec, thou)
-            if score > best_score:
-                best_score = score
+            metrics = _evaluate_combination(samples, dec, thou)
+            if best_metrics is None or metrics > best_metrics:
+                best_metrics = metrics
                 best_decimal = dec
                 best_thousands = thou
 
-    confidence = best_score / len(samples) if samples else 0.0
+    successes = best_metrics[0] if best_metrics else 0
+    confidence = successes / len(samples) if samples else 0.0
     return FormatSuggestion(
         decimal=best_decimal or ".",
         thousands=best_thousands,
@@ -249,15 +259,19 @@ def _collect_samples(df: pd.DataFrame, max_samples: int) -> List[str]:
     return samples
 
 
-def _score_combination(samples: Sequence[str], decimal: str, thousands: Optional[str]) -> int:
+def _evaluate_combination(
+    samples: Sequence[str], decimal: str, thousands: Optional[str]
+) -> Tuple[int, int, int]:
     successes = 0
+    decimal_hits = 0
+    thousands_hits = 0
     for value in samples:
         normalized = _normalize_value(value, decimal, thousands)
-        if normalized is None:
-            continue
-        if VALIDATED_NUMBER_RE.match(normalized):
+        if normalized is not None and VALIDATED_NUMBER_RE.match(normalized):
             successes += 1
-    return successes
+        decimal_hits += _decimal_context_match(value, decimal)
+        thousands_hits += _thousands_context_match(value, thousands, decimal)
+    return successes, decimal_hits, thousands_hits
 
 
 def _convert_series(
@@ -332,6 +346,64 @@ def _normalize_value(
         return None
 
     return cleaned
+
+
+def _decimal_context_match(value: Optional[str], decimal: Optional[str]) -> int:
+    if value is None or decimal is None:
+        return 0
+    text = str(value).strip()
+    if not text or decimal not in text:
+        return 0
+
+    idx = text.rfind(decimal)
+    if idx == -1:
+        return 0
+    left = text[:idx].strip()
+    right = text[idx + len(decimal) :].strip()
+    if not left or not right:
+        return 0
+
+    left_digit = left[-1]
+    if not left_digit.isdigit():
+        return 0
+
+    right_digits = re.sub(r"[^\d]", "", right)
+    if not right_digits:
+        return 0
+    if len(right_digits) > 3:
+        return 0
+    return 1
+
+
+def _thousands_context_match(
+    value: Optional[str],
+    thousands: Optional[str],
+    decimal: Optional[str],
+) -> int:
+    if value is None or not thousands:
+        return 0
+    text = str(value).strip()
+    if not text or thousands not in text:
+        return 0
+
+    decimal_index = text.rfind(decimal) if decimal else -1
+    integer_part = text if decimal_index == -1 else text[:decimal_index]
+    if not integer_part:
+        return 0
+
+    parts = [part for part in integer_part.split(thousands) if part != ""]
+    if len(parts) <= 1:
+        return 0
+
+    first_digits = re.sub(r"[^\d]", "", parts[0])
+    if not first_digits or len(first_digits) > 3:
+        return 0
+
+    for segment in parts[1:]:
+        segment_digits = re.sub(r"[^\d]", "", segment)
+        if len(segment_digits) != 3:
+            return 0
+    return 1
 
 
 def _collect_examples(

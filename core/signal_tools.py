@@ -162,6 +162,8 @@ def validate_filter_spec(spec: FilterSpec, fs: Optional[float]) -> tuple[bool, s
 # -----------------------------
 def moving_average(y: pd.Series, window: int) -> pd.Series:
     w = max(1, int(window))
+    if w == 1:
+        return y.copy()
     return y.rolling(window=w, min_periods=1, center=False).mean()
 
 
