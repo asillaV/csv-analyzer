@@ -299,11 +299,25 @@ class CSVAnalyzerApp(App):
             manual_fs = float(fs_txt.replace(",", "."))
         except Exception:
             manual_fs = 0.0
-        fs_value, fs_src = resolve_fs(x_values, manual_fs if manual_fs > 0 else None)
+        fs_info = resolve_fs(x_values, manual_fs if manual_fs > 0 else None)
+        fs_value = fs_info.value if fs_info.value and fs_info.value > 0 else None
         if fs_value:
-            self.notify(f"fs: {fs_value:.6g} ({'manuale' if fs_src=='manual' else 'stimata'})", severity="information")
+            source_labels = {
+                "manual": "manuale",
+                "datetime": "stimata da timestamp (mediana Δt)",
+                "index": "stimata su indice (passi consecutivi)",
+            }
+            label = source_labels.get(fs_info.source, fs_info.source)
+            msg = f"fs: {fs_value:.6g} ({label})"
+            median_dt = fs_info.details.get("median_dt") if fs_info.details else None
+            if median_dt:
+                unit_label = "s" if fs_info.unit == "seconds" else "step"
+                msg += f" | Δt mediano: {median_dt:.4g} {unit_label}"
+            self.notify(msg, severity="information")
         else:
             self.notify("fs non disponibile: filtri Butterworth e FFT verranno saltati.", severity="warning")
+        for warn in fs_info.warnings:
+            self.notify(warn, severity="warning")
 
         # filtro spec
         val_kind = self.query_one("#f_kind", Select).value
@@ -340,6 +354,15 @@ class CSVAnalyzerApp(App):
         val_fft_w = self.query_one("#fft_on_what", Select).value
         fft_on_what = val_fft_w if isinstance(val_fft_w, str) and val_fft_w else "filtered"
         fft_detrend = self.query_one("#fft_detrend", Switch).value
+
+        if fft_on:
+            if not fs_value:
+                self.notify("FFT disabilitata: fs non disponibile.", severity="warning")
+                fft_on = False
+            elif not fs_info.is_uniform:
+                detail = '; '.join(fs_info.warnings) if fs_info.warnings else 'campionamento irregolare.'
+                self.notify(f"FFT disabilitata: {detail}", severity="warning")
+                fft_on = False
 
         # limiti (solo Y per semplicità in TUI)
         y_min_txt = self.query_one("#y_min", Input).value
@@ -386,6 +409,9 @@ class CSVAnalyzerApp(App):
                 y_fft = y_filt if (fspec.enabled and fft_on_what == "filtered" and y_filt is not None) else y
                 if not fs_value or fs_value <= 0:
                     self.notify(f"FFT non calcolata per {yname}: fs non disponibile.", severity="warning")
+                elif not fs_info.is_uniform:
+                    detail = '; '.join(fs_info.warnings) if fs_info.warnings else 'campionamento irregolare.'
+                    self.notify(f"FFT non calcolata per {yname}: {detail}", severity="warning")
                 else:
                     freqs, amp = compute_fft(y_fft, fs_value, detrend=fft_detrend)
                     if freqs.size == 0:
