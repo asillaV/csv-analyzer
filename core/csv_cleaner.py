@@ -243,10 +243,22 @@ def suggest_number_format(
 
 
 def _collect_samples(df: pd.DataFrame, max_samples: int) -> List[str]:
+    """
+    Raccoglie campioni di valori numerici dal DataFrame per stimare il formato.
+    Ottimizzato per ridurre iterazioni inutili.
+    """
     samples: List[str] = []
+    # OPTIMIZATION: Limita la scansione a (max_samples * 4 / num_colonne) per colonna
+    # per evitare di scansionare troppi valori quando ci sono molte colonne
+    rows_per_column = max(10, (max_samples * 4) // max(1, len(df.columns)))
+
     for column in df.columns:
+        if len(samples) >= max_samples:
+            break  # Esci early se abbiamo abbastanza campioni
+
         series = df[column].astype("string", copy=False)
-        for value in series.head(max_samples * 4):
+        # Itera solo su un subset limitato di righe per colonna
+        for value in series.head(rows_per_column):
             if value is None or pd.isna(value):
                 continue
             text = str(value).strip()
@@ -279,33 +291,48 @@ def _convert_series(
 ) -> pd.Series:
     """
     Converte una Series di stringhe in numerici usando operazioni vettoriali.
+    Ottimizzato per ridurre il numero di operazioni regex.
     """
     s = series.astype("string", copy=False)
     s = s.str.strip()
     if s.isna().all():
         return pd.Series(pd.NA, index=series.index, dtype="Float64")
 
+    # Batch replace: spazi non-breaking -> spazio normale
     s = s.str.replace("\u202F", " ", regex=False).str.replace("\u2009", " ", regex=False)
-    s = s.str.replace(PREFIX_SYMBOLS_RE, "", regex=True)
 
+    # OPTIMIZATION: Combina rimozione prefissi e suffissi in una singola regex
     if TRAILING_SYMBOLS:
-        trailing_pattern = "(" + "|".join(re.escape(sym) for sym in TRAILING_SYMBOLS) + r")+?$"
-        s = s.str.replace(trailing_pattern, "", regex=True).str.strip()
+        # Pattern: ^[<>~=]+ per prefissi, [%‰°]+$ per suffissi
+        combined_pattern = r"^[<>~=]+|[" + "".join(re.escape(sym) for sym in TRAILING_SYMBOLS) + r"]+$"
+        s = s.str.replace(combined_pattern, "", regex=True)
+    else:
+        s = s.str.replace(PREFIX_SYMBOLS_RE, "", regex=True)
 
+    # Gestione thousands separator
     if thousands:
         if thousands.strip() == "":
+            # Rimuovi tutti gli spazi
             s = s.str.replace(r"\s+", "", regex=True)
         else:
-            s = s.str.replace(re.escape(thousands), "", regex=True)
+            # OPTIMIZATION: usa regex=False per replace letterale (più veloce)
+            s = s.str.replace(thousands, "", regex=False)
+    else:
+        # Rimuovi spazi residui
+        s = s.str.replace(" ", "", regex=False)
 
-    s = s.str.replace(" ", "", regex=False)
-
+    # Sostituisci decimal separator
     if decimal and decimal != ".":
         s = s.str.replace(decimal, ".", regex=False)
 
+    # OPTIMIZATION: Rimuovi tutti i caratteri non numerici in SINGLE PASS
+    # Invece di fare più replace, una sola regex finale
     s = s.str.replace(r"[^0-9+\-\.eE]", "", regex=True)
+
+    # Batch replace di stringhe invalide
     s = s.replace({"": pd.NA, "+": pd.NA, "-": pd.NA, "+.": pd.NA, "-.": pd.NA, ".": pd.NA})
 
+    # Conversione finale
     numeric = pd.to_numeric(s, errors="coerce")
     return numeric.astype("Float64")
 
@@ -420,12 +447,19 @@ def _collect_examples(
 def _detect_all_nan_rows(
     df_raw: pd.DataFrame, df_clean: pd.DataFrame, numeric_columns: Sequence[str]
 ) -> List[int]:
+    """
+    Rileva righe che avevano cifre prima del cleaning ma sono diventate NaN dopo.
+    Ottimizzato con operazioni vettoriali invece di applymap.
+    """
     if not numeric_columns:
         return []
 
     raw_numeric_subset = df_raw[numeric_columns].astype("string")
-    has_digit = raw_numeric_subset.fillna("").applymap(
-        lambda v: bool(NUMERIC_TOKEN_RE.search(str(v))) if v is not pd.NA else False
+
+    # OPTIMIZATION: Invece di applymap (deprecated + slow), usa str.contains vettoriale
+    # Crea una Series concatenata di tutti i valori, poi usa str.contains
+    has_digit = raw_numeric_subset.fillna("").apply(
+        lambda col: col.str.contains(r"\d", na=False, regex=True)
     )
 
     clean_numeric = df_clean[numeric_columns]
