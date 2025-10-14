@@ -45,7 +45,7 @@ RESETTABLE_KEYS = {
     "f_lo",
     "f_hi",
     "overlay_orig",
-    "enable_fft",
+    # "enable_fft" removed: widget has no key, resets automatically with form nonce
     "fft_use",
     "detrend",
     # Report testuale
@@ -744,13 +744,11 @@ def main():
                 if fft_available
                 else f"Servono almeno {MIN_ROWS_FOR_FFT} campioni per calcolare l'FFT."
             )
-            if not fft_available:
-                st.session_state["enable_fft"] = False
 
+            # No key= parameter: widget state is local to the form, resets automatically
             enable_fft = st.checkbox(
                 "Calcola FFT",
-                value=bool(st.session_state.get("enable_fft", False)),
-                key="enable_fft",
+                value=False,
                 disabled=not fft_available,
                 help=fft_help,
             )
