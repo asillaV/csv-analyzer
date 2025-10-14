@@ -16,6 +16,7 @@ from core.loader import load_csv
 from core.csv_cleaner import CleaningReport
 from core.report_manager import ReportManager
 from core.visual_report_manager import VisualPlotSpec, VisualReportManager
+from core.downsampling import downsample_series, DownsampleResult
 from core.signal_tools import (
     FilterSpec,
     FFTSpec,
@@ -56,9 +57,13 @@ RESETTABLE_KEYS = {
     "vis_report_format",
     "vis_report_legend",
     "_sample_error",
+    "plot_quality_mode",
 }
 
 MIN_ROWS_FOR_FFT = 128
+PERFORMANCE_THRESHOLD = 100_000
+PERFORMANCE_MAX_POINTS = 10_000
+PERFORMANCE_METHOD = "lttb"
 SAMPLE_CSV_PATH = Path("assets/sample_timeseries.csv")
 
 
@@ -656,6 +661,15 @@ def main():
     total_rows = len(df)
     st.caption(f"Mostrate le prime {n_preview} righe su {total_rows} totali.")
 
+    quality_key = "plot_quality_mode"
+    file_sig_key = "_quality_file_sig"
+    default_quality = "Prestazioni" if total_rows > PERFORMANCE_THRESHOLD else "Alta fedeltà"
+    if st.session_state.get(file_sig_key) != file_sig:
+        st.session_state[file_sig_key] = file_sig
+        st.session_state[quality_key] = default_quality
+    else:
+        st.session_state.setdefault(quality_key, default_quality)
+
     # Pulsante Reset impostazioni (non rimuove il file caricato)
     rc1, rc2 = st.columns([3, 1])
     with rc2:
@@ -670,6 +684,16 @@ def main():
         x_col = st.selectbox("Colonna X (opzionale)", options=["—"] + cols, index=0)
         y_cols = st.multiselect("Colonne Y", options=cols)
         mode = st.radio("Modalità grafico", ["Sovrapposto", "Separati", "Cascata"], horizontal=True, index=0)
+        quality_mode = st.radio(
+            "Alta fedeltà / Prestazioni",
+            ["Alta fedeltà", "Prestazioni"],
+            horizontal=True,
+            key=quality_key,
+            help="Prestazioni applica downsampling LTTB a circa 10k punti per serie per migliorare la reattività. Filtri e FFT restano sui dati completi.",
+        )
+        st.caption(
+            "Il downsampling riduce la traccia prima del rendering. Usa Alta fedeltà se ti servono tutti i campioni (possibile lag oltre 100k punti)."
+        )
 
         c1, c2 = st.columns(2)
         with c1:
@@ -832,12 +856,51 @@ def main():
             # Usa l'indice numerico implicito quando manca una colonna X esplicita
             default_min = 0.0
             default_max = float(len(df) - 1) if len(df) > 0 else 0.0
-            if xmin_idx is None:
-                xmin_idx = default_min
-            if xmax_idx is None:
-                xmax_idx = default_max
-            if xmin_idx != xmax_idx:
-                xrange = (xmin_idx, xmax_idx)
+        if xmin_idx is None:
+            xmin_idx = default_min
+        if xmax_idx is None:
+            xmax_idx = default_max
+        if xmin_idx != xmax_idx:
+            xrange = (xmin_idx, xmax_idx)
+
+    quality_mode = st.session_state.get(quality_key, "Alta fedeltà")
+    performance_enabled = quality_mode == "Prestazioni"
+    downsample_cache: dict[tuple[int, Optional[int]], DownsampleResult] = {}
+    downsample_events: List[tuple[str, DownsampleResult]] = []
+    recorded_results: set[int] = set()
+
+    def _legend_label(base: str, meta: Optional[DownsampleResult]) -> str:
+        if meta is None or meta.original_count <= meta.sampled_count:
+            return base
+        return f"{base} [down {meta.original_count:,}->{meta.sampled_count:,}]"
+
+    def _prepare_plot_series(
+        label: str,
+        y_data: pd.Series,
+        x_data: Optional[pd.Series],
+        *,
+        reuse_index: Optional[pd.Index] = None,
+    ) -> tuple[Optional[pd.Series], pd.Series, Optional[DownsampleResult]]:
+        if reuse_index is not None:
+            y_sel = y_data.loc[reuse_index]
+            x_sel = x_data.loc[reuse_index] if x_data is not None else None
+            return x_sel, y_sel, None
+        if not performance_enabled or len(y_data) <= PERFORMANCE_MAX_POINTS:
+            return x_data, y_data, None
+        cache_key = (id(y_data), id(x_data) if x_data is not None else None)
+        result = downsample_cache.get(cache_key)
+        if result is None:
+            result = downsample_series(
+                y_data,
+                x_data,
+                max_points=PERFORMANCE_MAX_POINTS,
+                method=PERFORMANCE_METHOD,
+            )
+            downsample_cache[cache_key] = result
+        if result.original_count > result.sampled_count and id(result) not in recorded_results:
+            downsample_events.append((label, result))
+            recorded_results.add(id(result))
+        return result.x, result.y, result
 
     # ========================= PLOT ========================= #
     if mode == "Sovrapposto":
@@ -868,28 +931,40 @@ def main():
                 else:
                     y_plot = series
 
+            name_main = yname + (" (filtrato)" if (fspec.enabled and not overlay_orig) else "")
+            x_main, y_main, main_meta = _prepare_plot_series(name_main, y_plot, x_ser)
+
             # Originale tratteggiato se richiesto
             if overlay_orig and fspec.enabled and y_filt is not None:
+                overlay_label = f"{yname} (originale)"
+                reuse_idx = y_main.index if main_meta and main_meta.original_count > main_meta.sampled_count else None
+                x_overlay, y_overlay, overlay_meta = _prepare_plot_series(
+                    overlay_label,
+                    series,
+                    x_ser,
+                    reuse_index=reuse_idx,
+                )
                 combined.add_trace(
                     go.Scatter(
-                        x=(x_ser if x_ser is not None else None),
-                        y=series,
+                        x=(x_overlay if x_overlay is not None else None),
+                        y=y_overlay,
                         mode="lines",
-                        name=f"{yname} (originale)",
-                        line=dict(width=1, dash="dot")
+                        name=_legend_label(overlay_label, overlay_meta or main_meta),
+                        line=dict(width=1, dash="dot"),
                     )
                 )
 
             # Traccia principale (filtrato o originale)
-            name_main = yname + (" (filtrato)" if (fspec.enabled and not overlay_orig) else "")
             combined.add_trace(
                 go.Scatter(
-                    x=(x_ser if x_ser is not None else None),
-                    y=y_plot,
+                    x=(x_main if x_main is not None else None),
+                    y=y_main,
                     mode="lines",
-                    name=name_main
+                    name=_legend_label(name_main, main_meta),
                 )
             )
+            if overlay_orig and fspec.enabled and y_filt is not None:
+                combined.data = combined.data[::-1]
 
         combined.update_layout(
             title="Confronto sovrapposto",
@@ -962,14 +1037,33 @@ def main():
                 else:
                     y_plot = series
 
-            fig = _plot_xy(x_ser, y_plot, name=yname + (" (filtrato)" if (fspec.enabled and not overlay_orig) else ""))
+            display_name = yname + (" (filtrato)" if (fspec.enabled and not overlay_orig) else "")
+            x_plot, y_plot_ds, main_meta = _prepare_plot_series(display_name, y_plot, x_ser)
+            fig = _plot_xy(x_plot, y_plot_ds, name=display_name)
+            if fig.data:
+                fig.data[0].name = _legend_label(display_name, main_meta)
             if yrange:
                 fig.update_yaxes(range=yrange)
             if xrange:
                 fig.update_xaxes(range=xrange)
             if overlay_orig and fspec.enabled and y_filt is not None:
-                fig.add_trace(go.Scatter(x=x_ser if x_ser is not None else None, y=series, mode="lines",
-                                         name=f"{yname} (originale)", line=dict(width=1, dash="dot")))
+                overlay_label = f"{yname} (originale)"
+                reuse_idx = y_plot_ds.index if main_meta and main_meta.original_count > main_meta.sampled_count else None
+                x_overlay, y_overlay, overlay_meta = _prepare_plot_series(
+                    overlay_label,
+                    series,
+                    x_ser,
+                    reuse_index=reuse_idx,
+                )
+                fig.add_trace(
+                    go.Scatter(
+                        x=x_overlay if x_overlay is not None else None,
+                        y=y_overlay,
+                        mode="lines",
+                        name=_legend_label(overlay_label, overlay_meta or main_meta),
+                        line=dict(width=1, dash="dot"),
+                    )
+                )
                 fig.data = fig.data[::-1]
             _plotly_chart(host, fig)
 
@@ -1017,14 +1111,33 @@ def main():
                 else:
                     y_plot = series
 
-            fig = _plot_xy(x_ser, y_plot, name=yname + (" (filtrato)" if (fspec.enabled and not overlay_orig) else ""))
+            display_name = yname + (" (filtrato)" if (fspec.enabled and not overlay_orig) else "")
+            x_plot, y_plot_ds, main_meta = _prepare_plot_series(display_name, y_plot, x_ser)
+            fig = _plot_xy(x_plot, y_plot_ds, name=display_name)
+            if fig.data:
+                fig.data[0].name = _legend_label(display_name, main_meta)
             if yrange:
                 fig.update_yaxes(range=yrange)
             if xrange:
                 fig.update_xaxes(range=xrange)
             if overlay_orig and fspec.enabled and y_filt is not None:
-                fig.add_trace(go.Scatter(x=x_ser if x_ser is not None else None, y=series, mode="lines",
-                                         name=f"{yname} (originale)", line=dict(width=1, dash="dot")))
+                overlay_label = f"{yname} (originale)"
+                reuse_idx = y_plot_ds.index if main_meta and main_meta.original_count > main_meta.sampled_count else None
+                x_overlay, y_overlay, overlay_meta = _prepare_plot_series(
+                    overlay_label,
+                    series,
+                    x_ser,
+                    reuse_index=reuse_idx,
+                )
+                fig.add_trace(
+                    go.Scatter(
+                        x=x_overlay if x_overlay is not None else None,
+                        y=y_overlay,
+                        mode="lines",
+                        name=_legend_label(overlay_label, overlay_meta or main_meta),
+                        line=dict(width=1, dash="dot"),
+                    )
+                )
                 fig.data = fig.data[::-1]
             _plotly_chart(st, fig)
 
@@ -1045,6 +1158,20 @@ def main():
                             st,
                             _plot_fft(freqs, amp, title=f"FFT — {yname}"),
                         )
+
+    if performance_enabled:
+        summaries: List[str] = []
+        seen_pairs: set[tuple[str, int]] = set()
+        for label, res in downsample_events:
+            key = (label, res.sampled_count)
+            if res.original_count <= res.sampled_count or key in seen_pairs:
+                continue
+            seen_pairs.add(key)
+            summaries.append(
+                f"{label}: {res.original_count:,}->{res.sampled_count:,} ({res.reduction_ratio:.1f}x)"
+            )
+        if summaries:
+            st.caption("Prestazioni attive (LTTB): " + " · ".join(summaries))
 
     # ---- Report ----
     st.divider()
