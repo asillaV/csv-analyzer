@@ -84,47 +84,72 @@ class TestResolveFs:
     """Test per resolve_fs() - Single Source of Truth per fs."""
 
     def test_manual_fs_priority(self):
-        """fs manuale ha priorità sulla stima."""
-        x = pd.Series([0.0, 0.1, 0.2, 0.3])  # stimerebbe 10 Hz
-        fs, source = resolve_fs(x, manual_fs=100.0)
-        assert fs == pytest.approx(100.0)
-        assert source == "manual"
+        x = pd.Series([0.0, 0.1, 0.2, 0.3])
+        info = resolve_fs(x, manual_fs=100.0)
+        assert info.value == pytest.approx(100.0)
+        assert info.source == "manual"
+        assert info.is_uniform is True
+        assert info.warnings == []
 
-    def test_automatic_estimation(self):
-        """Stima automatica quando manual_fs assente."""
+    def test_numeric_estimation_on_index(self):
         x = pd.Series([0.0, 0.1, 0.2, 0.3])  # fs ~ 10 Hz
-        fs, source = resolve_fs(x, manual_fs=None)
-        assert fs is not None
-        assert fs == pytest.approx(10.0, rel=0.01)
-        assert source == "estimated"
+        info = resolve_fs(x, manual_fs=None)
+        assert info.value == pytest.approx(10.0, rel=0.01)
+        assert info.source == "index"
+        assert info.is_uniform is True
+        assert info.details.get("median_dt") == pytest.approx(0.1, rel=0.01)
+
+    def test_datetime_estimation(self):
+        x = pd.Series(pd.date_range('2025-01-01', periods=5, freq='1S'))
+        info = resolve_fs(x, manual_fs=None)
+        assert info.value == pytest.approx(1.0, rel=0.01)
+        assert info.source == "datetime"
+        assert info.is_uniform is True
 
     def test_zero_manual_fs_triggers_estimation(self):
-        """manual_fs=0 dovrebbe usare stima."""
         x = pd.Series([0.0, 0.5, 1.0])  # fs ~ 2 Hz
-        fs, source = resolve_fs(x, manual_fs=0.0)
-        # 0 non è valido come manuale, deve stimare
-        assert fs is not None
-        assert source == "estimated"
+        info = resolve_fs(x, manual_fs=0.0)
+        assert info.value == pytest.approx(2.0, rel=0.05)
+        assert info.source == "index"
 
     def test_negative_manual_fs_ignored(self):
-        """fs manuale negativa viene ignorata."""
         x = pd.Series([0.0, 0.1, 0.2])
-        fs, source = resolve_fs(x, manual_fs=-10.0)
-        # Negativo non valido, deve stimare o ritornare None
-        assert source == "estimated" or source == "none"
+        info = resolve_fs(x, manual_fs=-10.0)
+        assert info.source in {"index", "none"}
 
     def test_no_x_no_manual(self):
-        """Nessun X e nessun manual_fs."""
-        fs, source = resolve_fs(None, manual_fs=None)
-        assert fs is None
-        assert source == "none"
+        info = resolve_fs(None, manual_fs=None)
+        assert info.value is None
+        assert info.source == "none"
+        assert info.warnings
 
     def test_invalid_x_no_manual(self):
-        """X non stimabile e nessun manual_fs."""
         x = pd.Series([np.nan, np.nan])
-        fs, source = resolve_fs(x, manual_fs=None)
-        assert fs is None
-        assert source == "none"
+        info = resolve_fs(x, manual_fs=None)
+        assert info.value is None
+        assert info.source == "none"
+        assert info.warnings
+
+    def test_irregular_datetime_sampling_warning(self):
+        times = pd.Series([
+            pd.Timestamp('2025-01-01 00:00:00'),
+            pd.Timestamp('2025-01-01 00:00:01'),
+            pd.Timestamp('2025-01-01 00:00:03'),
+            pd.Timestamp('2025-01-01 00:00:03.500'),
+        ])
+        info = resolve_fs(times, manual_fs=None)
+        assert info.value is not None
+        assert info.source == "datetime"
+        assert info.is_uniform is False
+        assert info.warnings
+
+    def test_irregular_index_sampling_warning(self):
+        x = pd.Series([0.0, 0.1, 0.4, 0.55, 1.5])
+        info = resolve_fs(x, manual_fs=None)
+        assert info.value is not None
+        assert info.source == "index"
+        assert info.is_uniform is False
+        assert info.warnings
 
 
 class TestValidateFilterSpec:

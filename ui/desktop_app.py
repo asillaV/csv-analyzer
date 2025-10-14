@@ -360,11 +360,25 @@ class DesktopAppTk(tk.Tk):
         x_for_fs = None
         if x_series is not None:
             x_for_fs = x_series[mask] if mask is not None else x_series
-        fs_value, fs_src = resolve_fs(x_for_fs, manual_fs if manual_fs > 0 else None)
+        fs_info = resolve_fs(x_for_fs, manual_fs if manual_fs > 0 else None)
+        fs_value = fs_info.value if fs_info.value and fs_info.value > 0 else None
         if fs_value:
-            self._append_log(f"fs: {fs_value:.6g} ({'manuale' if fs_src=='manual' else 'stimata'})")
+            source_labels = {
+                "manual": "manuale",
+                "datetime": "stimata da timestamp (mediana Δt)",
+                "index": "stimata su indice (passi consecutivi)",
+            }
+            label = source_labels.get(fs_info.source, fs_info.source)
+            msg = f"fs: {fs_value:.6g} ({label})"
+            median_dt = fs_info.details.get("median_dt") if fs_info.details else None
+            if median_dt:
+                unit_label = "s" if fs_info.unit == "seconds" else "step"
+                msg += f" | Δt mediano: {median_dt:.4g} {unit_label}"
+            self._append_log(msg)
         else:
             self._append_log("fs non disponibile: Butterworth/FFT verranno saltati se richiesti.")
+        for warn in fs_info.warnings:
+            self._append_log(warn)
 
         # Filtro
         f_kind = self.fkind_combo.get() or "none"
@@ -390,6 +404,15 @@ class DesktopAppTk(tk.Tk):
         fft_on = bool(self.fft_on_var.get())
         fft_what = self.fft_what_combo.get() or "filtered"
         detrend = bool(self.detrend_var.get())
+
+        if fft_on:
+            if not fs_value:
+                self._append_log('FFT disabilitata: fs non disponibile.')
+                fft_on = False
+            elif not fs_info.is_uniform:
+                detail = '; '.join(fs_info.warnings) if fs_info.warnings else 'campionamento irregolare.'
+                self._append_log(f'FFT disabilitata: {detail}')
+                fft_on = False
 
         # Limiti Y
         y_min = to_float(self.ymin_entry.get())
@@ -466,11 +489,14 @@ class DesktopAppTk(tk.Tk):
                 save_plot_html(fig, base=f"plot_{yname}")
 
         # FFT (per serie, file separati anche in modalità sovrapposti)
-        if self.fft_on_var.get():
+        if fft_on:
             for (yname, x_used, y_plot, y_orig) in series_list:
                 y_fft = y_plot if (fspec.enabled and (self.fft_what_combo.get() == "filtered")) else (y_orig if (y_orig is not None and self.fft_what_combo.get()=="original") else y_plot)
                 if not fs_value or fs_value <= 0:
                     self._append_log(f"FFT non calcolata per {yname}: fs non disponibile.")
+                elif not fs_info.is_uniform:
+                    detail = '; '.join(fs_info.warnings) if fs_info.warnings else 'campionamento irregolare.'
+                    self._append_log(f"FFT non calcolata per {yname}: {detail}")
                 else:
                     freqs, amp = compute_fft(y_fft, fs_value, detrend=self.detrend_var.get())
                     if freqs.size == 0:

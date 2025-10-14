@@ -810,11 +810,25 @@ def main():
             x_values = xnum if xnum.notna().mean() >= 0.8 else pd.to_datetime(df[x_name], errors="coerce")
 
     # Risolvo fs UNA SOLA VOLTA
-    fs_value, fs_src = resolve_fs(x_values, manual_fs if manual_fs > 0 else None)
-    if fs_value and fs_value > 0:
-        st.info(f"fs [Hz]: **{fs_value:.6g}** ({'manuale' if fs_src=='manual' else 'stimata'})")
+    fs_info = resolve_fs(x_values, manual_fs if manual_fs > 0 else None)
+    fs_value = fs_info.value if fs_info.value and fs_info.value > 0 else None
+    if fs_value:
+        source_labels = {
+            "manual": "manuale",
+            "datetime": "stimata da timestamp (mediana Δt)",
+            "index": "stimata su indice (passi consecutivi)",
+        }
+        label = source_labels.get(fs_info.source, fs_info.source)
+        info_lines = [f"fs [Hz]: **{fs_value:.6g}** ({label})"]
+        median_dt = fs_info.details.get("median_dt") if fs_info.details else None
+        if median_dt:
+            unit_label = "s" if fs_info.unit == "seconds" else "step"
+            info_lines.append(f"Δt mediano: {median_dt:.4g} {unit_label}")
+        st.info("  \n".join(info_lines))
     else:
         st.warning("fs non disponibile: filtri Butterworth e FFT verranno saltati se richiesti.")
+    for warn in fs_info.warnings:
+        st.warning(warn)
 
     # Preparo specs
     kind_map = {
@@ -839,6 +853,15 @@ def main():
         ma_window=int(ma_win),
     )
     fftspec = FFTSpec(enabled=bool(enable_fft), detrend=bool(detrend), window="hann")
+
+    if fftspec.enabled:
+        if not fs_value:
+            st.warning("FFT disabilitata: fs non disponibile.")
+            fftspec.enabled = False
+        elif not fs_info.is_uniform:
+            detail = '; '.join(fs_info.warnings) if fs_info.warnings else 'campionamento irregolare.'
+            st.warning(f"FFT disabilitata: {detail}")
+            fftspec.enabled = False
 
     # --- Parse range assi --- #
     y_for_range = pd.concat([pd.to_numeric(df[c], errors="coerce") for c in y_cols], axis=0)
@@ -942,6 +965,9 @@ def main():
                 y_fft = y_filt if (fspec.enabled and y_filt is not None and fft_use == "Filtrato (se attivo)") else series
                 if not fs_value or fs_value <= 0:
                     st.warning(f"FFT non calcolata per {yname}: fs non disponibile.")
+                elif not fs_info.is_uniform:
+                    detail = "; ".join(fs_info.warnings) if fs_info.warnings else "campionamento irregolare."
+                    st.warning(f"FFT non calcolata per {yname}: {detail}")
                 else:
                     freqs, amp = compute_fft(y_fft, fs_value, detrend=fftspec.detrend)
                     if freqs.size == 0:
@@ -996,6 +1022,9 @@ def main():
                 y_fft = y_filt if (fspec.enabled and y_filt is not None and fft_use == "Filtrato (se attivo)") else series
                 if not fs_value or fs_value <= 0:
                     host.warning(f"FFT non calcolata per {yname}: fs non disponibile.")
+                elif not fs_info.is_uniform:
+                    detail = "; ".join(fs_info.warnings) if fs_info.warnings else "campionamento irregolare."
+                    host.warning(f"FFT non calcolata per {yname}: {detail}")
                 else:
                     freqs, amp = compute_fft(y_fft, fs_value, detrend=fftspec.detrend)
                     if freqs.size == 0:
@@ -1048,6 +1077,9 @@ def main():
                 y_fft = y_filt if (fspec.enabled and y_filt is not None and fft_use == "Filtrato (se attivo)") else series
                 if not fs_value or fs_value <= 0:
                     st.warning(f"FFT non calcolata per {yname}: fs non disponibile.")
+                elif not fs_info.is_uniform:
+                    detail = "; ".join(fs_info.warnings) if fs_info.warnings else "campionamento irregolare."
+                    st.warning(f"FFT non calcolata per {yname}: {detail}")
                 else:
                     freqs, amp = compute_fft(y_fft, fs_value, detrend=fftspec.detrend)
                     if freqs.size == 0:
