@@ -24,6 +24,7 @@
 6. [Architettura del progetto](#architettura-del-progetto)
 7. [Gestione della frequenza di campionamento](#gestione-della-frequenza-di-campionamento)
 8. [Troubleshooting & test manuali](#troubleshooting--test-manuali)
+9. [Documentazione & risorse](#documentazione--risorse)
 
 ---
 
@@ -117,7 +118,19 @@ web_app.py           -> UI Streamlit (pannello Advanced + report visivo)
 desktop_app_tk.py    -> Entrypoint desktop Tkinter
 main.py              -> Entrypoint TUI (Textual)
 requirements.txt
-README.md
+README.md            -> Panoramica generale e quickstart
+docs/
+  CONTRIBUTING.md    -> Linee guida per contribuire e processi PR
+  ARCHITECTURE.md    -> Sintesi moduli + flussi principali
+  CHANGELOG.md       -> Diario rilasci e riorganizzazioni
+  agents/            -> Istruzioni dedicate a Codex/Claude
+  reports/           -> Analisi tecniche e report approfonditi
+  manual-tests/      -> Piani di test manuali e checklist
+patches/
+  20240215-fft-checkbox-reset/
+    README.md        -> Fix una tantum per reset FFT
+scripts/
+  csv_spawner.py     -> Generatore dataset sintetici per tests_csv/
 ```
 
 ---
@@ -146,6 +159,78 @@ def resolve_fs(x_values, manual_fs: float | None) -> tuple[float | None, str]:
 
 ---
 
+## Data Quality Checks
+
+L'applicazione include controlli automatici di qualità dati non bloccanti che segnalano potenziali problemi senza interrompere il flusso di lavoro.
+
+### Cosa viene controllato
+
+1. **Monotonia dell'asse X**
+   - Rileva timestamp duplicati o valori decrescenti
+   - Segnala violazioni con esempi di indici problematici
+   - Critico per analisi temporali e FFT
+
+2. **Gap nell'asse X (campionamento irregolare)**
+   - Identifica interruzioni nel campionamento dove Δt > k × mediana(Δt)
+   - Soglia configurabile (default: k=5)
+   - Riporta mediana Δt, rapporto del gap e percentuale intervalli impattati
+
+3. **Spike nei valori Y (outlier)**
+   - Usa Z-score robusto basato su mediana e MAD (Median Absolute Deviation)
+   - Soglia configurabile (default: |Z| ≥ 4)
+   - Rileva anche segnali costanti (MAD ≈ 0)
+
+### Configurazione
+
+I parametri si trovano in `config.json`:
+
+```json
+{
+  "quality": {
+    "gap_factor_k": 5.0,      // Moltiplicatore per rilevamento gap
+    "spike_z": 4.0,            // Soglia Z-score per outlier
+    "min_points": 20,          // Punti minimi per controlli robusti
+    "max_examples": 5          // Esempi massimi per issue
+  }
+}
+```
+
+### Interpretazione del report
+
+**Badge di stato:**
+- 🟢 **OK**: Nessun problema rilevato
+- 🟡 **Attenzione**: Uno o più problemi trovati (l'analisi continua comunque)
+
+**Dettagli qualità** (pannello espandibile):
+- Configurazione usata (k, Z, min_points)
+- Note informative (es. dataset corto, uso dell'indice come X)
+- Lista problemi con conteggi, percentuali ed esempi
+
+**Avvisi soft per FFT/filtri:**
+- Se >5% degli intervalli hanno gap, compare una nota che indica "campionamento irregolare"
+- I risultati di FFT e filtri Butterworth potrebbero essere meno affidabili
+
+### Casi limite gestiti
+
+- **Dataset corti** (< min_points): Nota informativa, nessun warning se i dati sono validi
+- **Valori NaN/Inf**: Esclusi dai calcoli, conteggiati nei dettagli
+- **Colonne Y non numeriche**: Coercizione automatica; se fallisce, colonna saltata con nota
+- **X assente**: Usa l'indice DataFrame come X
+- **Segnali costanti**: Identificati separatamente (non come spike)
+
+### Performance
+
+I controlli sono ottimizzati per complessità O(N):
+- Operazioni vettorizzate con pandas/numpy
+- Nessuna iterazione riga per riga
+- Test su 1M righe completati in < 5 secondi
+
+### Note di design
+
+I controlli qualità sono **non bloccanti**: l'applicazione continua a funzionare normalmente anche in presenza di problemi. Gli avvisi servono solo per informare l'utente di potenziali limitazioni nei risultati.
+
+---
+
 ## Troubleshooting & test manuali
 
 | Scenario | Atteso |
@@ -158,6 +243,15 @@ def resolve_fs(x_values, manual_fs: float | None) -> tuple[float | None, str]:
 | Slice X (Tkinter) | Supporta valori numerici/datetime oppure indici posizionali se X non è selezionata. |
 | Output HTML | I file in `outputs/` hanno nomi sanificati e si aprono senza errori `as_uri`. |
 | Log | Controlla `logs/*.log` per verificare warning e parametri stimati. |
+
+---
+
+## Documentazione & risorse
+- 📚 **Architettura**: panoramica moduli e flussi in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+- ✅ **Contributi**: stile, test e processi PR in [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) e nelle guide agent [`docs/agents/`](docs/agents/).
+- 📝 **Changelog**: cronologia sintetica in [`docs/CHANGELOG.md`](docs/CHANGELOG.md).
+- 🛠️ **Patch storiche**: fix una tantum e script mirati in [`patches/`](patches/).
+- 🔁 **Script utility**: generatori e helper CLI in [`scripts/`](scripts/).
 
 ---
 

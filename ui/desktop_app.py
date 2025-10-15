@@ -4,7 +4,7 @@ import re
 import sys
 import webbrowser
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -17,8 +17,10 @@ from tkinter.scrolledtext import ScrolledText
 
 # Core del progetto
 from core.analyzer import analyze_csv
+from core.csv_cleaner import CleaningReport
 from core.loader import load_csv
 from core.report_manager import ReportManager
+from core.downsampling import downsample_series, DownsampleResult
 from core.signal_tools import (
     FilterSpec,
     resolve_fs,
@@ -26,6 +28,10 @@ from core.signal_tools import (
     apply_filter,
     compute_fft,
 )
+
+PERFORMANCE_THRESHOLD = 100_000
+PERFORMANCE_MAX_POINTS = 10_000
+PERFORMANCE_METHOD = "lttb"
 
 # ---------------------- Util ---------------------- #
 def _safe_base(name: str) -> str:
@@ -158,6 +164,8 @@ class DesktopAppTk(tk.Tk):
         # Stato
         self.df: Optional[pd.DataFrame] = None
         self.columns: List[str] = []
+        self.cleaning_report: Optional[CleaningReport] = None
+        self._perf_last_rows: Optional[int] = None
 
         # --- Layout base
         self.columnconfigure(0, weight=0)
@@ -256,6 +264,17 @@ class DesktopAppTk(tk.Tk):
         self.plot_mode_combo = ttk.Combobox(mode_frame, values=["separati","sovrapposti"], state="readonly", width=12)
         self.plot_mode_combo.set("separati")
         self.plot_mode_combo.grid(row=0, column=1, sticky="w", padx=4)
+        self.perf_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            mode_frame,
+            text="Modalità prestazioni (downsampling LTTB)",
+            variable=self.perf_var,
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 2))
+        ttk.Label(
+            mode_frame,
+            text="Riduce a ~10k punti per traccia; FFT e filtri usano sempre i dati completi.",
+            wraplength=280,
+        ).grid(row=2, column=0, columnspan=2, sticky="w")
 
         # ====== Azioni ======
         act_frame = ttk.Frame(left, padding=(0,8))
@@ -311,12 +330,26 @@ class DesktopAppTk(tk.Tk):
             return
         try:
             meta = analyze_csv(path)
-            self.df = load_csv(path, encoding=meta.get("encoding"),
-                                     delimiter=meta.get("delimiter"),
-                                     header=meta.get("header"))
+            self.df, self.cleaning_report = load_csv(
+                path,
+                encoding=meta.get("encoding"),
+                delimiter=meta.get("delimiter"),
+                header=meta.get("header"),
+                return_details=True,
+            )
             self.columns = meta.get("columns", list(self.df.columns))
             self._refresh_columns()
+            rows = len(self.df) if self.df is not None else 0
+            if self._perf_last_rows != rows:
+                self.perf_var.set(rows > PERFORMANCE_THRESHOLD)
+                self._perf_last_rows = rows
             self._append_log(f"CSV caricato: {len(self.df)} righe, {len(self.columns)} colonne.")
+            if self.cleaning_report:
+                suggestion = self.cleaning_report.suggestion
+                self._append_log(
+                    f"Formato numerico: decimale={suggestion.decimal}, migliaia={suggestion.thousands or 'nessuno'} "
+                    f"(conf. {suggestion.confidence:.0%})"
+                )
         except Exception as e:
             messagebox.showerror("Errore", f"Analisi/caricamento fallito: {e}")
 
@@ -348,11 +381,25 @@ class DesktopAppTk(tk.Tk):
         x_for_fs = None
         if x_series is not None:
             x_for_fs = x_series[mask] if mask is not None else x_series
-        fs_value, fs_src = resolve_fs(x_for_fs, manual_fs if manual_fs > 0 else None)
+        fs_info = resolve_fs(x_for_fs, manual_fs if manual_fs > 0 else None)
+        fs_value = fs_info.value if fs_info.value and fs_info.value > 0 else None
         if fs_value:
-            self._append_log(f"fs: {fs_value:.6g} ({'manuale' if fs_src=='manual' else 'stimata'})")
+            source_labels = {
+                "manual": "manuale",
+                "datetime": "stimata da timestamp (mediana Δt)",
+                "index": "stimata su indice (passi consecutivi)",
+            }
+            label = source_labels.get(fs_info.source, fs_info.source)
+            msg = f"fs: {fs_value:.6g} ({label})"
+            median_dt = fs_info.details.get("median_dt") if fs_info.details else None
+            if median_dt:
+                unit_label = "s" if fs_info.unit == "seconds" else "step"
+                msg += f" | Δt mediano: {median_dt:.4g} {unit_label}"
+            self._append_log(msg)
         else:
             self._append_log("fs non disponibile: Butterworth/FFT verranno saltati se richiesti.")
+        for warn in fs_info.warnings:
+            self._append_log(warn)
 
         # Filtro
         f_kind = self.fkind_combo.get() or "none"
@@ -379,9 +426,57 @@ class DesktopAppTk(tk.Tk):
         fft_what = self.fft_what_combo.get() or "filtered"
         detrend = bool(self.detrend_var.get())
 
+        if fft_on:
+            if not fs_value:
+                self._append_log('FFT disabilitata: fs non disponibile.')
+                fft_on = False
+            elif not fs_info.is_uniform:
+                detail = '; '.join(fs_info.warnings) if fs_info.warnings else 'campionamento irregolare.'
+                self._append_log(f'FFT disabilitata: {detail}')
+                fft_on = False
+
         # Limiti Y
         y_min = to_float(self.ymin_entry.get())
         y_max = to_float(self.ymax_entry.get())
+        performance_on = bool(self.perf_var.get())
+
+        downsample_cache: Dict[Tuple[int, Optional[int]], DownsampleResult] = {}
+        recorded_ids: set[int] = set()
+        downsample_notes: List[str] = []
+
+        def legend_label(base: str, meta: Optional[DownsampleResult]) -> str:
+            if meta is None or meta.original_count <= meta.sampled_count:
+                return base
+            return f"{base} [down {meta.original_count}->{meta.sampled_count}]"
+
+        def prepare_series(
+            label: str,
+            series: pd.Series,
+            x_series: Optional[pd.Series],
+            reuse_index: Optional[pd.Index] = None,
+        ) -> Tuple[Optional[pd.Series], pd.Series, Optional[DownsampleResult]]:
+            if reuse_index is not None:
+                y_sel = series.loc[reuse_index]
+                x_sel = x_series.loc[reuse_index] if x_series is not None else None
+                return x_sel, y_sel, None
+            if not performance_on or len(series) <= PERFORMANCE_MAX_POINTS:
+                return x_series, series, None
+            cache_key = (id(series), id(x_series) if x_series is not None else None)
+            result = downsample_cache.get(cache_key)
+            if result is None:
+                result = downsample_series(
+                    series,
+                    x_series,
+                    max_points=PERFORMANCE_MAX_POINTS,
+                    method=PERFORMANCE_METHOD,
+                )
+                downsample_cache[cache_key] = result
+            if result.original_count > result.sampled_count and id(result) not in recorded_ids:
+                downsample_notes.append(
+                    f"{label}: {result.original_count}->{result.sampled_count} ({result.reduction_ratio:.1f}x)"
+                )
+                recorded_ids.add(id(result))
+            return result.x, result.y, result
 
         # Modalità
         mode = self.plot_mode_combo.get() or "separati"
@@ -425,14 +520,68 @@ class DesktopAppTk(tk.Tk):
             fig = go.Figure()
             has_x = any(x is not None for _, x, _, _ in series_list)
             for (yname, x_used, y_plot, y_orig) in series_list:
-                if has_x and x_used is not None and len(x_used) == len(y_plot):
-                    fig.add_trace(go.Scatter(x=x_used, y=y_plot, mode="lines", name=f"{yname} (filtrato)" if fspec.enabled else yname))
+                display_name = yname + (" (filtrato)" if (fspec.enabled and not overlay) else "")
+                x_plot, y_plot_ds, main_meta = prepare_series(display_name, y_plot, x_used)
+                if has_x and x_plot is not None:
+                    fig.add_trace(
+                        go.Scatter(
+                            x=x_plot,
+                            y=y_plot_ds,
+                            mode="lines",
+                            name=legend_label(display_name, main_meta),
+                        )
+                    )
                     if overlay and fspec.enabled and y_orig is not None:
-                        fig.add_trace(go.Scatter(x=x_used, y=y_orig, mode="lines", name=f"{yname} (originale)", line=dict(width=1, dash="dot")))
+                        reuse_idx = (
+                            y_plot_ds.index
+                            if main_meta and main_meta.original_count > main_meta.sampled_count
+                            else None
+                        )
+                        x_overlay, y_overlay, overlay_meta = prepare_series(
+                            f"{yname} (originale)",
+                            y_orig,
+                            x_used,
+                            reuse_index=reuse_idx,
+                        )
+                        fig.add_trace(
+                            go.Scatter(
+                                x=x_overlay if x_overlay is not None else None,
+                                y=y_overlay,
+                                mode="lines",
+                                name=legend_label(f"{yname} (originale)", overlay_meta or main_meta),
+                                line=dict(width=1, dash="dot"),
+                            )
+                        )
+                        fig.data = fig.data[::-1]
                 else:
-                    fig.add_trace(go.Scatter(y=y_plot, mode="lines", name=f"{yname} (filtrato)" if fspec.enabled else yname))
+                    fig.add_trace(
+                        go.Scatter(
+                            y=y_plot_ds,
+                            mode="lines",
+                            name=legend_label(display_name, main_meta),
+                        )
+                    )
                     if overlay and fspec.enabled and y_orig is not None:
-                        fig.add_trace(go.Scatter(y=y_orig, mode="lines", name=f"{yname} (originale)", line=dict(width=1, dash="dot")))
+                        reuse_idx = (
+                            y_plot_ds.index
+                            if main_meta and main_meta.original_count > main_meta.sampled_count
+                            else None
+                        )
+                        _, y_overlay, overlay_meta = prepare_series(
+                            f"{yname} (originale)",
+                            y_orig,
+                            None,
+                            reuse_index=reuse_idx,
+                        )
+                        fig.add_trace(
+                            go.Scatter(
+                                y=y_overlay,
+                                mode="lines",
+                                name=legend_label(f"{yname} (originale)", overlay_meta or main_meta),
+                                line=dict(width=1, dash="dot"),
+                            )
+                        )
+                        fig.data = fig.data[::-1]
             fig.update_xaxes(title="X" if has_x else "index")
             fig.update_yaxes(title="Y")
             fig.update_layout(margin=dict(l=40, r=20, t=30, b=40), height=620, title="Serie Y sovrapposte")
@@ -442,29 +591,55 @@ class DesktopAppTk(tk.Tk):
         else:
             # separati: uno per serie (come prima)
             for (yname, x_used, y_plot, y_orig) in series_list:
-                fig = plot_xy(x_used, y_plot, name=yname + (" (filtrato)" if (fspec.enabled and not overlay) else ""))
+                display_name = yname + (" (filtrato)" if (fspec.enabled and not overlay) else "")
+                x_plot, y_plot_ds, main_meta = prepare_series(display_name, y_plot, x_used)
+                fig = plot_xy(x_plot, y_plot_ds, name=display_name)
+                if fig.data:
+                    fig.data[0].name = legend_label(display_name, main_meta)
                 if y_min is not None or y_max is not None:
                     fig.update_yaxes(range=[y_min, y_max])
                 if overlay and fspec.enabled and y_orig is not None:
-                    if x_used is not None and len(x_used) == len(y_orig):
-                        fig.add_trace(go.Scatter(x=x_used, y=y_orig, mode="lines", name=f"{yname} (originale)", line=dict(width=1, dash="dot")))
-                    else:
-                        fig.add_trace(go.Scatter(y=y_orig, mode="lines", name=f"{yname} (originale)", line=dict(width=1, dash="dot")))
+                    reuse_idx = (
+                        y_plot_ds.index
+                        if main_meta and main_meta.original_count > main_meta.sampled_count
+                        else None
+                    )
+                    x_overlay, y_overlay, overlay_meta = prepare_series(
+                        f"{yname} (originale)",
+                        y_orig,
+                        x_used,
+                        reuse_index=reuse_idx,
+                    )
+                    fig.add_trace(
+                        go.Scatter(
+                            x=x_overlay if x_overlay is not None else None,
+                            y=y_overlay,
+                            mode="lines",
+                            name=legend_label(f"{yname} (originale)", overlay_meta or main_meta),
+                            line=dict(width=1, dash="dot"),
+                        )
+                    )
                     fig.data = fig.data[::-1]
                 save_plot_html(fig, base=f"plot_{yname}")
 
         # FFT (per serie, file separati anche in modalità sovrapposti)
-        if self.fft_on_var.get():
+        if fft_on:
             for (yname, x_used, y_plot, y_orig) in series_list:
                 y_fft = y_plot if (fspec.enabled and (self.fft_what_combo.get() == "filtered")) else (y_orig if (y_orig is not None and self.fft_what_combo.get()=="original") else y_plot)
                 if not fs_value or fs_value <= 0:
                     self._append_log(f"FFT non calcolata per {yname}: fs non disponibile.")
+                elif not fs_info.is_uniform:
+                    detail = '; '.join(fs_info.warnings) if fs_info.warnings else 'campionamento irregolare.'
+                    self._append_log(f"FFT non calcolata per {yname}: {detail}")
                 else:
                     freqs, amp = compute_fft(y_fft, fs_value, detrend=self.detrend_var.get())
                     if freqs.size == 0:
                         self._append_log(f"FFT non calcolabile per {yname} (serie troppo corta o parametri non validi).")
                     else:
                         save_plot_html(plot_fft(freqs, amp, title=f"FFT — {yname}"), base=f"fft_{yname}")
+
+        if performance_on and downsample_notes:
+            self._append_log("Downsampling LTTB: " + " | ".join(downsample_notes))
 
         self._append_log("Plot completati. File in outputs/ (aperti nel browser).")
 

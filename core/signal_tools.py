@@ -1,6 +1,6 @@
 from __future__ import annotations
-from dataclasses import dataclass
-from typing import Optional, Tuple, Literal
+from dataclasses import dataclass, field
+from typing import Optional, Tuple, Literal, List, Dict
 
 import numpy as np
 import pandas as pd
@@ -10,6 +10,31 @@ try:
     _SCIPY_OK = True
 except Exception:
     _SCIPY_OK = False
+
+
+# -----------------------------
+# Sampling analysis config
+# -----------------------------
+IRREGULAR_RATIO_THRESHOLD: float = 1.5  # max(max_dt / min_dt) prima del warning
+IRREGULAR_STD_THRESHOLD: float = 0.2   # std_rel = std(dt) / median(dt)
+
+
+# -----------------------------
+# Sampling info dataclass
+# -----------------------------
+@dataclass
+class FsInfo:
+    value: Optional[float]
+    source: Literal["manual", "datetime", "index", "none"]
+    unit: Literal["seconds", "index", "manual", "unknown"] = "unknown"
+    is_uniform: bool = True
+    warnings: List[str] = field(default_factory=list)
+    details: Dict[str, float] = field(default_factory=dict)
+
+    def __iter__(self):
+        # Consente ancora: fs, source = resolve_fs(...)
+        yield self.value
+        yield self.source
 
 
 # -----------------------------
@@ -45,60 +70,156 @@ def _is_datetime_like(x: pd.Index | pd.Series) -> bool:
 
 def estimate_fs(x: pd.Index | pd.Series | None) -> Optional[float]:
     """
-    Stima fs dai valori X:
-      - Datetime/Timedelta: differenze in secondi -> fs = 1/mediana(dt)
-      - Numerico: differenze dirette -> fs = 1/mediana(dx)
-    Restituisce None se non stimabile o se i delta non sono positivi.
+    Mantiene compatibilità con l'API precedente restituendo solo il valore di fs.
+    Per ottenere warning e dettagli usare resolve_fs().
     """
-    if x is None:
-        return None
-
-    if isinstance(x, pd.Series):
-        xv = x.dropna().to_numpy()
-    else:
-        xv = x.dropna().values
-
-    if len(xv) < 2:
-        return None
-
-    if _is_datetime_like(x):
-        xv = pd.to_datetime(xv).astype("int64") / 1e9  # ns -> s
-    else:
-        try:
-            xv = pd.to_numeric(xv, errors="coerce").astype(float)
-        except Exception:
-            return None
-
-    dx = np.diff(xv)
-    dx = dx[np.isfinite(dx)]
-    dx = dx[dx > 0]
-    if dx.size == 0:
-        return None
-    med = float(np.median(dx))
-    if med <= 0:
-        return None
-    return float(1.0 / med)
+    info = resolve_fs(x, manual_fs=None)
+    return info.value
 
 
-def resolve_fs(x_values: pd.Index | pd.Series | None,
-               manual_fs: Optional[float]) -> tuple[Optional[float], Literal["manual", "estimated", "none"]]:
+def resolve_fs(
+    x_values: pd.Index | pd.Series | None,
+    manual_fs: Optional[float],
+) -> FsInfo:
     """
-    Ritorna (fs, source): fs>0 se disponibile, altrimenti None; source ∈ {"manual","estimated","none"}.
-    Regole:
-      - manual_fs > 0 -> ("manual")
-      - altrimenti prova estimate_fs(x_values) -> ("estimated")
-      - altrimenti -> (None, "none")
+    Determina la frequenza di campionamento applicando la priorità:
+      1. manual_fs positivo (source="manual")
+      2. stima automatica su datetime -> source="datetime"
+      3. stima su indice numerico -> source="index"
+      4. assenza di stima -> source="none"
+    Restituisce un FsInfo che include warning e metriche di irregolarità.
     """
     if manual_fs is not None:
         try:
-            if float(manual_fs) > 0:
-                return float(manual_fs), "manual"
+            manual_val = float(manual_fs)
+        except (TypeError, ValueError):
+            manual_val = None
+        if manual_val is not None and manual_val > 0:
+            return FsInfo(
+                value=float(manual_val),
+                source="manual",
+                unit="manual",
+                is_uniform=True,
+                warnings=[],
+                details={"manual_fs": float(manual_val)},
+            )
+
+    return _analyze_sampling(x_values)
+
+
+def _analyze_sampling(x: pd.Index | pd.Series | None) -> FsInfo:
+    if x is None:
+        return FsInfo(
+            value=None,
+            source="none",
+            unit="unknown",
+            is_uniform=False,
+            warnings=["Nessun asse X disponibile per stimare la frequenza di campionamento."],
+        )
+
+    if isinstance(x, pd.Series):
+        series = x.dropna()
+    else:
+        try:
+            series = pd.Series(x.dropna())
         except Exception:
-            pass
-    fs = estimate_fs(x_values)
-    if fs is not None and fs > 0:
-        return float(fs), "estimated"
-    return None, "none"
+            series = pd.Series([])
+
+    if len(series) < 2:
+        return FsInfo(
+            value=None,
+            source="none",
+            unit="unknown",
+            is_uniform=False,
+            warnings=["Campioni X insufficienti per stimare la frequenza di campionamento."],
+        )
+
+    is_datetime = _is_datetime_like(series)
+
+    try:
+        if is_datetime:
+            values = pd.to_datetime(series).astype("int64") / 1e9  # ns -> s
+            unit = "seconds"
+            source = "datetime"
+        else:
+            values = pd.to_numeric(series, errors="coerce").astype(float)
+            values = values[np.isfinite(values)]
+            unit = "index"
+            source = "index"
+    except Exception:
+        return FsInfo(
+            value=None,
+            source="none",
+            unit="unknown",
+            is_uniform=False,
+            warnings=["Impossibile interpretare i valori X per la stima di fs."],
+        )
+
+    if len(values) < 2:
+        return FsInfo(
+            value=None,
+            source="none",
+            unit="unknown",
+            is_uniform=False,
+            warnings=["Campioni X insufficienti per stimare la frequenza di campionamento."],
+        )
+
+    dx = np.diff(values)
+    dx = dx[np.isfinite(dx)]
+    dx = dx[dx > 0]
+
+    if dx.size == 0:
+        return FsInfo(
+            value=None,
+            source="none",
+            unit="unknown",
+            is_uniform=False,
+            warnings=["Differenze non positive sull'asse X; campionamento non valido."],
+        )
+
+    med = float(np.median(dx))
+    if med <= 0:
+        return FsInfo(
+            value=None,
+            source="none",
+            unit="unknown",
+            is_uniform=False,
+            warnings=["Mediana delle differenze nulla o negativa; campionamento non valido."],
+        )
+
+    fs_value = float(1.0 / med)
+    min_dt = float(np.min(dx))
+    max_dt = float(np.max(dx))
+    std_dt = float(np.std(dx))
+    rel_std = std_dt / med if med > 0 else 0.0
+    ratio = (max_dt / min_dt) if min_dt > 0 else float("inf")
+
+    warnings: List[str] = []
+    is_uniform = True
+    if ratio > IRREGULAR_RATIO_THRESHOLD or rel_std > IRREGULAR_STD_THRESHOLD:
+        is_uniform = False
+        parts = []
+        if ratio > IRREGULAR_RATIO_THRESHOLD:
+            parts.append(f"Δt max/min = {ratio:.2f}")
+        if rel_std > IRREGULAR_STD_THRESHOLD:
+            parts.append(f"std_rel = {rel_std:.2f}")
+        warnings.append("Campionamento irregolare: " + ", ".join(parts))
+
+    return FsInfo(
+        value=fs_value,
+        source=source,
+        unit=unit,
+        is_uniform=is_uniform,
+        warnings=warnings,
+        details={
+            "median_dt": med,
+            "min_dt": min_dt,
+            "max_dt": max_dt,
+            "std_dt": std_dt,
+            "rel_std": rel_std,
+            "ratio_max_min": ratio,
+        },
+    )
 
 
 # -----------------------------
@@ -162,6 +283,8 @@ def validate_filter_spec(spec: FilterSpec, fs: Optional[float]) -> tuple[bool, s
 # -----------------------------
 def moving_average(y: pd.Series, window: int) -> pd.Series:
     w = max(1, int(window))
+    if w == 1:
+        return y.copy()
     return y.rolling(window=w, min_periods=1, center=False).mean()
 
 
@@ -213,9 +336,8 @@ def apply_filter(
     if spec.kind == "ma":
         return moving_average(series, spec.ma_window), None
 
-    fs = fs_override
-    if fs is None:
-        fs = estimate_fs(x_values) if x_values is not None else None
+    fs_info = resolve_fs(x_values, fs_override)
+    fs = fs_info.value
 
     ok, msg = validate_filter_spec(spec, fs)
     if not ok:

@@ -10,10 +10,13 @@ env/
 venv/
 *.egg-info/
 
-# ===== Logs & temporary files =====
+# ===== Runtime artefacts =====
 logs/
 outputs/
+htmlcov/
+coverage.xml
 tmp_*.csv
+tmp_upload.csv
 *.log
 *.tmp
 *.bak
@@ -58,3 +61,12 @@ desktop.ini
 
 # === Cartella CSV di test ===
 tests_csv/
+
+# ===== Testing & Coverage =====
+.pytest_cache/
+.coverage
+*.cover
+.hypothesis/
+
+# ===== Claude =====
+.claude/

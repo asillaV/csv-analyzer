@@ -1,0 +1,8 @@
+{
+  "quality": {
+    "gap_factor_k": 5.0,
+    "spike_z": 4.0,
+    "min_points": 20,
+    "max_examples": 5
+  }
+}

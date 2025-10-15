@@ -25,8 +25,10 @@ from textual.widgets import (
 )
 
 from core.analyzer import analyze_csv
+from core.csv_cleaner import CleaningReport
 from core.loader import load_csv
 from core.report_manager import ReportManager
+from core.downsampling import downsample_series, DownsampleResult
 from core.signal_tools import (
     FilterSpec,
     FFTSpec,          # se lo usi altrove
@@ -38,6 +40,9 @@ from core.signal_tools import (
 
 __all__ = ["CSVAnalyzerApp"]
 
+PERFORMANCE_THRESHOLD = 100_000
+PERFORMANCE_MAX_POINTS = 10_000
+PERFORMANCE_METHOD = "lttb"
 
 # ---------------------- util plotting ---------------------- #
 def _plot_xy(x: Optional[pd.Series], y: pd.Series, name: str) -> go.Figure:
@@ -103,6 +108,8 @@ class CSVAnalyzerApp(App):
         self.columns: List[str] = []
         self.x_col: Optional[str] = None
         self.y_cols: List[str] = []  # ricalcolata dai checkbox
+        self.cleaning_report: Optional[CleaningReport] = None
+        self._perf_last_rows: Optional[int] = None
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -147,6 +154,11 @@ class CSVAnalyzerApp(App):
                     yield Input(placeholder="Ordine Butterworth (es. 4)", id="f_order")
                     yield Input(placeholder="Cutoff low (Hz)", id="f_lo")
                     yield Input(placeholder="Cutoff high (Hz, solo BP)", id="f_hi")
+                    yield Label("Modalità grafici (Prestazioni / Alta fedeltà)")
+                    yield Switch(value=False, id="perf_mode")
+                    yield Static(
+                        "Prestazioni: downsampling LTTB a ~10k punti per traccia. Filtri e FFT usano i dati completi."
+                    )
                     yield Switch(value=True, id="overlay")
                     yield Label("FFT")
                     yield Switch(value=False, id="fft_on")
@@ -248,27 +260,50 @@ class CSVAnalyzerApp(App):
             self.notify("Percorso vuoto.", severity="warning"); return
         try:
             self.meta = analyze_csv(path)
-            self.df = load_csv(path, encoding=self.meta.get("encoding"),
-                                     delimiter=self.meta.get("delimiter"),
-                                     header=self.meta.get("header"))
+            self.df, self.cleaning_report = load_csv(
+                path,
+                encoding=self.meta.get("encoding"),
+                delimiter=self.meta.get("delimiter"),
+                header=self.meta.get("header"),
+                return_details=True,
+            )
+            if self.cleaning_report:
+                self.meta["cleaning"] = self.cleaning_report.to_dict()
             self.columns = self.meta.get("columns", list(self.df.columns))
             self._refresh_columns()
-            self.notify("CSV caricato.", severity="information")
+            try:
+                perf_switch = self.query_one("#perf_mode", Switch)
+                rows = len(self.df) if self.df is not None else 0
+                if self._perf_last_rows != rows:
+                    perf_switch.value = rows > PERFORMANCE_THRESHOLD
+                    self._perf_last_rows = rows
+            except Exception:
+                pass
+            if self.cleaning_report:
+                suggestion = self.cleaning_report.suggestion
+                self.notify(
+                    f"CSV caricato (decimale={suggestion.decimal}, migliaia={suggestion.thousands or 'nessuno'}).",
+                    severity="information",
+                )
+            else:
+                self.notify("CSV caricato.", severity="information")
         except Exception as e:
             self.notify(f"Errore analisi/caricamento: {e}", severity="error")
 
+
+
     def _do_plot(self) -> None:
         if self.df is None or not len(self.df):
-            self.notify("Nessun dataframe.", severity="warning"); return
+            self.notify("Nessun dataframe.", severity="warning")
+            return
 
-        # rileggo Y dai checkbox
         self.y_cols = self._read_y_from_checkboxes()
         if not self.y_cols:
-            self.notify("Seleziona almeno una Y con i checkbox.", severity="warning"); return
+            self.notify("Seleziona almeno una Y con i checkbox.", severity="warning")
+            return
 
-        # X
         x_sel = self.query_one("#sel_x", Select).value
-        x_col = None if (x_sel in (None, "none") or (not isinstance(x_sel, str))) else str(x_sel)
+        x_col = None if (x_sel in (None, "none") or not isinstance(x_sel, str)) else str(x_sel)
         x_values: Optional[pd.Series] = None
         if x_col and x_col in self.df.columns:
             xraw = self.df[x_col]
@@ -278,32 +313,45 @@ class CSVAnalyzerApp(App):
                 xnum = pd.to_numeric(xraw, errors="coerce")
                 x_values = xnum if xnum.notna().mean() >= 0.8 else pd.to_datetime(xraw, errors="coerce")
 
-        # fs manuale
-        fs_txt = self.query_one("#adv_fs", Input).value or "0"
-        try:
-            manual_fs = float(fs_txt.replace(",", "."))
-        except Exception:
-            manual_fs = 0.0
-        fs_value, fs_src = resolve_fs(x_values, manual_fs if manual_fs > 0 else None)
-        if fs_value:
-            self.notify(f"fs: {fs_value:.6g} ({'manuale' if fs_src=='manual' else 'stimata'})", severity="information")
-        else:
-            self.notify("fs non disponibile: filtri Butterworth e FFT verranno saltati.", severity="warning")
+        self.x_col = x_col
 
-        # filtro spec
+        xmin_txt = self.query_one("#x_min", Input).value.strip()
+        xmax_txt = self.query_one("#x_max", Input).value.strip()
+        if xmin_txt or xmax_txt:
+            self._append_log(f"Limiti X richiesti: {xmin_txt or '-'} / {xmax_txt or '-'}")
+
+        manual_fs_txt = self.query_one("#adv_fs", Input).value.strip()
+        manual_fs = None
+        if manual_fs_txt:
+            try:
+                manual_fs = float(manual_fs_txt.replace(",", "."))
+            except Exception:
+                self.notify("fs manuale non valida.", severity="warning")
+
+        fs_info = resolve_fs(x_values, manual_fs)
+        fs_value = fs_info.value if fs_info.value and fs_info.value > 0 else None
+        if not fs_value:
+            self.notify("fs non disponibile: filtri Butterworth e FFT verranno saltati.", severity="warning")
+        for warn in fs_info.warnings:
+            self.notify(warn, severity="warning")
+
         val_kind = self.query_one("#f_kind", Select).value
-        f_kind = val_kind if isinstance(val_kind, str) and val_kind else "none"   # evita Select.BLANK
+        f_kind = val_kind if isinstance(val_kind, str) and val_kind else "none"
         f_order = int((self.query_one("#f_order", Input).value or "4").strip() or "4")
         ma_win = int((self.query_one("#ma_win", Input).value or "5").strip() or "5")
         f_lo = self.query_one("#f_lo", Input).value.strip()
         f_hi = self.query_one("#f_hi", Input).value.strip()
 
-        def _tof(s: str) -> Optional[float]:
-            if not s: return None
-            try: return float(s.replace(",", "."))
-            except Exception: return None
+        def _tof(value: str) -> Optional[float]:
+            if not value:
+                return None
+            try:
+                return float(value.replace(",", "."))
+            except Exception:
+                return None
 
-        lo = _tof(f_lo); hi = _tof(f_hi)
+        lo = _tof(f_lo)
+        hi = _tof(f_hi)
 
         cutoff: Optional[Tuple[Optional[float], Optional[float]]] = None
         if f_kind in ("butter_lp", "butter_hp") and lo is not None:
@@ -319,27 +367,73 @@ class CSVAnalyzerApp(App):
             ma_window=ma_win,
         )
         overlay = self.query_one("#overlay", Switch).value
+        performance_on = self.query_one("#perf_mode", Switch).value
 
-        # FFT
         fft_on = self.query_one("#fft_on", Switch).value
         val_fft_w = self.query_one("#fft_on_what", Select).value
         fft_on_what = val_fft_w if isinstance(val_fft_w, str) and val_fft_w else "filtered"
         fft_detrend = self.query_one("#fft_detrend", Switch).value
 
-        # limiti (solo Y per semplicità in TUI)
+        if fft_on:
+            if not fs_value:
+                self.notify("FFT disabilitata: fs non disponibile.", severity="warning")
+                fft_on = False
+            elif not fs_info.is_uniform:
+                detail = "; ".join(fs_info.warnings) if fs_info.warnings else "campionamento irregolare."
+                self.notify(f"FFT disabilitata: {detail}", severity="warning")
+                fft_on = False
+
         y_min_txt = self.query_one("#y_min", Input).value
         y_max_txt = self.query_one("#y_max", Input).value
-        y_min = None if not y_min_txt else _tof(y_min_txt)
-        y_max = None if not y_max_txt else _tof(y_max_txt)
+        y_min = _tof(y_min_txt)
+        y_max = _tof(y_max_txt)
 
-        # loop serie
+        downsample_cache: Dict[Tuple[int, Optional[int]], DownsampleResult] = {}
+        recorded_ids: set[int] = set()
+        downsample_notes: List[str] = []
+
+        def legend_label(base: str, meta: Optional[DownsampleResult]) -> str:
+            if meta is None or meta.original_count <= meta.sampled_count:
+                return base
+            return f"{base} [down {meta.original_count}->{meta.sampled_count}]"
+
+        def prepare_series(
+            label: str,
+            series: pd.Series,
+            x_series: Optional[pd.Series],
+            reuse_index: Optional[pd.Index] = None,
+        ) -> Tuple[Optional[pd.Series], pd.Series, Optional[DownsampleResult]]:
+            if reuse_index is not None:
+                y_sel = series.loc[reuse_index]
+                x_sel = x_series.loc[reuse_index] if x_series is not None else None
+                return x_sel, y_sel, None
+            if not performance_on or len(series) <= PERFORMANCE_MAX_POINTS:
+                return x_series, series, None
+            cache_key = (id(series), id(x_series) if x_series is not None else None)
+            result = downsample_cache.get(cache_key)
+            if result is None:
+                result = downsample_series(
+                    series,
+                    x_series,
+                    max_points=PERFORMANCE_MAX_POINTS,
+                    method=PERFORMANCE_METHOD,
+                )
+                downsample_cache[cache_key] = result
+            if result.original_count > result.sampled_count and id(result) not in recorded_ids:
+                downsample_notes.append(
+                    f"{label}: {result.original_count}->{result.sampled_count} ({result.reduction_ratio:.1f}x)"
+                )
+                recorded_ids.add(id(result))
+            return result.x, result.y, result
+
         for yname in self.y_cols:
-            y = pd.to_numeric(self.df[yname], errors="coerce").dropna()
-            if y.empty:
+            y_series = pd.to_numeric(self.df[yname], errors="coerce").dropna()
+            if y_series.empty:
                 self.notify(f"'{yname}': nessun dato numerico valido.", severity="warning")
                 continue
 
-            y_plot = y
+            x_current = x_values.loc[y_series.index] if x_values is not None else None
+            y_plot = y_series
             y_filt = None
 
             ok, msg = validate_filter_spec(fspec, fs_value)
@@ -348,38 +442,71 @@ class CSVAnalyzerApp(App):
             else:
                 if fspec.enabled:
                     try:
-                        y_filt, _ = apply_filter(y, x_values, fspec, fs_override=fs_value)
+                        y_filt, _ = apply_filter(y_series, x_current, fspec, fs_override=fs_value)
                         y_plot = y_filt
-                    except Exception as e:
-                        self.notify(f"Filtro non applicato a {yname}: {e}", severity="warning")
-                        y_plot = y
+                    except Exception as exc:
+                        self.notify(f"Filtro non applicato a {yname}: {exc}", severity="warning")
+                        y_plot = y_series
 
-            fig = _plot_xy(x_values, y_plot, name=yname + (" (filtrato)" if (fspec.enabled and not overlay) else ""))
+            display_name = yname + (" (filtrato)" if (fspec.enabled and not overlay) else "")
+            x_plot, y_plot_ds, main_meta = prepare_series(display_name, y_plot, x_current)
+            fig = _plot_xy(x_plot, y_plot_ds, name=display_name)
+            if fig.data:
+                fig.data[0].name = legend_label(display_name, main_meta)
             if y_min is not None or y_max is not None:
-                yr = list(fig.layout.yaxis.range) if fig.layout.yaxis.range else [None, None]
-                fig.update_yaxes(range=[y_min if y_min is not None else yr[0],
-                                        y_max if y_max is not None else yr[1]])
+                current_range = list(fig.layout.yaxis.range) if fig.layout.yaxis.range else [None, None]
+                fig.update_yaxes(
+                    range=[
+                        y_min if y_min is not None else current_range[0],
+                        y_max if y_max is not None else current_range[1],
+                    ]
+                )
 
             if overlay and fspec.enabled and y_filt is not None:
-                fig.add_trace(go.Scatter(x=x_values if x_values is not None else None, y=y, mode="lines", name=f"{yname} (originale)", line=dict(width=1, dash="dot")))
+                overlay_label = f"{yname} (originale)"
+                reuse_idx = (
+                    y_plot_ds.index if main_meta and main_meta.original_count > main_meta.sampled_count else None
+                )
+                x_overlay, y_overlay, overlay_meta = prepare_series(
+                    overlay_label,
+                    y_series,
+                    x_current,
+                    reuse_index=reuse_idx,
+                )
+                fig.add_trace(
+                    go.Scatter(
+                        x=x_overlay if x_overlay is not None else None,
+                        y=y_overlay,
+                        mode="lines",
+                        name=legend_label(overlay_label, overlay_meta or main_meta),
+                        line=dict(width=1, dash="dot"),
+                    )
+                )
                 fig.data = fig.data[::-1]
 
             _save_open_html(fig, base=f"plot_{yname}")
 
-            # FFT
             if fft_on:
-                y_fft = y_filt if (fspec.enabled and fft_on_what == "filtered" and y_filt is not None) else y
+                y_fft = y_filt if (fspec.enabled and fft_on_what == "filtered" and y_filt is not None) else y_series
                 if not fs_value or fs_value <= 0:
                     self.notify(f"FFT non calcolata per {yname}: fs non disponibile.", severity="warning")
+                elif not fs_info.is_uniform:
+                    detail = "; ".join(fs_info.warnings) if fs_info.warnings else "campionamento irregolare."
+                    self.notify(f"FFT non calcolata per {yname}: {detail}", severity="warning")
                 else:
                     freqs, amp = compute_fft(y_fft, fs_value, detrend=fft_detrend)
                     if freqs.size == 0:
-                        self.notify(f"FFT non calcolabile per {yname} (serie troppo corta o parametri non validi).", severity="information")
+                        self.notify(
+                            f"FFT non calcolabile per {yname} (serie troppo corta o parametri non validi).",
+                            severity="information",
+                        )
                     else:
-                        _save_open_html(_plot_fft(freqs, amp, title=f"FFT — {yname}"), base=f"fft_{yname}")
+                        _save_open_html(_plot_fft(freqs, amp, title=f"FFT - {yname}"), base=f"fft_{yname}")
 
-        self._set_status("Plot completati. File salvati in outputs/ e aperti nel browser.")
-
+        status_msg = "Plot completati. File salvati in outputs/ e aperti nel browser."
+        if performance_on and downsample_notes:
+            status_msg += " Downsampling LTTB: " + " | ".join(downsample_notes)
+        self._set_status(status_msg)
     def _do_report(self) -> None:
         if self.df is None:
             self.notify("Nessun dataframe.", severity="warning"); return

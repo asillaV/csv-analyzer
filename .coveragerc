@@ -1,0 +1,33 @@
+# Configuration for coverage.py
+
+[run]
+source = core
+omit =
+    */tests/*
+    */test_*.py
+    */__pycache__/*
+    */site-packages/*
+    */.venv/*
+    core/plot_manager.py
+    core/visual_report_manager.py
+    core/report_manager.py
+
+[report]
+precision = 2
+show_missing = True
+skip_covered = False
+
+exclude_lines =
+    pragma: no cover
+    def __repr__
+    raise AssertionError
+    raise NotImplementedError
+    if __name__ == .__main__.:
+    if TYPE_CHECKING:
+    @abstract
+
+[html]
+directory = htmlcov
+
+[xml]
+output = coverage.xml
