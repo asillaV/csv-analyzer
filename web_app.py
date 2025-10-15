@@ -716,11 +716,17 @@ def main():
             type=["csv"],
             key="file_upload",
         )
+        sample_disabled = not sample_available or upload is not None
+        sample_help = (
+            "Devi eliminare il CSV in memoria prima di caricare il sample."
+            if upload is not None
+            else "Carica un dataset demo multi-canale (segnale + rumore)."
+        )
         sample_clicked = st.button(
             "Carica sample",
             key="load_sample",
-            disabled=not sample_available,
-            help="Carica un dataset demo multi-canale (segnale + rumore).",
+            disabled=sample_disabled,
+            help=sample_help,
         )
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -732,6 +738,15 @@ def main():
                 st.session_state["_sample_file_name"] = SAMPLE_CSV_PATH.name
                 st.session_state["_clear_file_uploader"] = True
                 st.session_state.pop("_sample_error", None)
+
+                # FIX #46: Libera TUTTA la cache upload prima del rerun
+                st.session_state.pop("_cached_df", None)
+                st.session_state.pop("_cached_cleaning_report", None)
+                st.session_state.pop("_cached_meta", None)
+                st.session_state.pop("_cached_file_sig", None)
+                st.session_state.pop("_cached_apply_cleaning", None)
+                _invalidate_result_caches()  # Pulisce filter/FFT cache
+
                 st.rerun()
             except Exception as exc:
                 st.session_state.pop("_sample_bytes", None)
@@ -771,7 +786,7 @@ def main():
 
     apply_cleaning = st.checkbox(
         "Applica correzione suggerita",
-        value=True,
+        value=False,
         key="_apply_cleaning",
         help="Rimuove separatori migliaia/decimali incoerenti e converte le colonne numeriche.",
     )
@@ -1646,4 +1661,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
