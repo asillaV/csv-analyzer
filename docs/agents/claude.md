@@ -36,7 +36,13 @@ python -m pip install -r requirements.txt
 
 ### Testing
 
-No automated test suite is currently present. Manual testing uses sample CSV files in the `tests_csv/` directory that cover various edge cases:
+Automated tests live under `tests/` and are executed with:
+
+```bash
+pytest
+```
+
+Use `pytest -m "not slow"` during quick iterations. Manual verification relies on the curated CSV fixtures in `tests_csv/` to cover edge cases:
 - Basic numeric data (`01_basic.csv`)
 - Numeric X axis (`02_with_x_numeric.csv`)
 - Datetime X axis (`03_with_x_datetime.csv`)

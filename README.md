@@ -24,6 +24,7 @@
 6. [Architettura del progetto](#architettura-del-progetto)
 7. [Gestione della frequenza di campionamento](#gestione-della-frequenza-di-campionamento)
 8. [Troubleshooting & test manuali](#troubleshooting--test-manuali)
+9. [Documentazione & risorse](#documentazione--risorse)
 
 ---
 
@@ -117,7 +118,19 @@ web_app.py           -> UI Streamlit (pannello Advanced + report visivo)
 desktop_app_tk.py    -> Entrypoint desktop Tkinter
 main.py              -> Entrypoint TUI (Textual)
 requirements.txt
-README.md
+README.md            -> Panoramica generale e quickstart
+docs/
+  CONTRIBUTING.md    -> Linee guida per contribuire e processi PR
+  ARCHITECTURE.md    -> Sintesi moduli + flussi principali
+  CHANGELOG.md       -> Diario rilasci e riorganizzazioni
+  agents/            -> Istruzioni dedicate a Codex/Claude
+  reports/           -> Analisi tecniche e report approfonditi
+  manual-tests/      -> Piani di test manuali e checklist
+patches/
+  20240215-fft-checkbox-reset/
+    README.md        -> Fix una tantum per reset FFT
+scripts/
+  csv_spawner.py     -> Generatore dataset sintetici per tests_csv/
 ```
 
 ---
@@ -230,6 +243,15 @@ I controlli qualità sono **non bloccanti**: l'applicazione continua a funzionar
 | Slice X (Tkinter) | Supporta valori numerici/datetime oppure indici posizionali se X non è selezionata. |
 | Output HTML | I file in `outputs/` hanno nomi sanificati e si aprono senza errori `as_uri`. |
 | Log | Controlla `logs/*.log` per verificare warning e parametri stimati. |
+
+---
+
+## Documentazione & risorse
+- 📚 **Architettura**: panoramica moduli e flussi in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+- ✅ **Contributi**: stile, test e processi PR in [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) e nelle guide agent [`docs/agents/`](docs/agents/).
+- 📝 **Changelog**: cronologia sintetica in [`docs/CHANGELOG.md`](docs/CHANGELOG.md).
+- 🛠️ **Patch storiche**: fix una tantum e script mirati in [`patches/`](patches/).
+- 🔁 **Script utility**: generatori e helper CLI in [`scripts/`](scripts/).
 
 ---
 
