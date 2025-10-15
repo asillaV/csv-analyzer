@@ -26,6 +26,16 @@ from core.signal_tools import (
     compute_fft,
 )
 from core.quality import run_quality_checks, DataQualityReport
+from core.preset_manager import (
+    save_preset,
+    load_preset,
+    list_presets,
+    delete_preset,
+    preset_exists,
+    create_default_presets,
+    PresetError,
+)
+from core.logger import LogManager
 
 # ---------------------- Reset helpers ---------------------- #
 RESETTABLE_KEYS = {
@@ -658,6 +668,14 @@ def _sync_visual_spec_state(selection: Sequence[str], default_x_label: str) -> N
 
 def main():
     st.set_page_config(page_title="Analizzatore CSV — Web", layout="wide")
+
+    # Inizializza preset di default all'avvio
+    try:
+        create_default_presets()
+    except Exception as e:
+        logger = LogManager(component="preset").get_logger()
+        logger.warning(f"Impossibile creare preset default: {e}")
+
     render_header()
 
     st.caption("Upload CSV → seleziona X/Y → limiti assi → Advanced (fs/filtri/FFT) → report")
@@ -1056,6 +1074,78 @@ def main():
                 disabled=not fft_available,
             )
 
+        # ---- PRESET CONFIGURAZIONI ----
+        with st.expander("Preset Configurazioni", expanded=False):
+            st.markdown("Salva e riutilizza configurazioni filtri/FFT frequenti.")
+
+            # Lista preset disponibili
+            try:
+                available_presets = list_presets()
+                preset_names = [p["name"] for p in available_presets]
+            except Exception as e:
+                st.error(f"Errore caricamento preset: {e}")
+                preset_names = []
+
+            # Layout: selectbox + pulsanti
+            pcol1, pcol2 = st.columns([3, 1])
+            with pcol1:
+                selected_preset = st.selectbox(
+                    "Preset disponibili",
+                    options=["---"] + preset_names,
+                    key="preset_selector"
+                )
+            with pcol2:
+                load_clicked = st.button("Carica", disabled=selected_preset == "---", key="load_preset_btn")
+
+            pcol3, pcol4, pcol5 = st.columns([1, 1, 2])
+            with pcol3:
+                save_clicked = st.button("Salva nuovo", key="save_preset_btn")
+            with pcol4:
+                delete_clicked = st.button("Elimina", disabled=selected_preset == "---", key="delete_preset_btn")
+
+            # Logica Load Preset
+            if load_clicked and selected_preset != "---":
+                try:
+                    preset_data = load_preset(selected_preset)
+                    st.session_state["_loaded_preset"] = preset_data
+                    st.session_state["_loaded_preset_name"] = selected_preset
+                    st.success(f"Preset '{selected_preset}' caricato! Riapri Advanced per vedere i parametri.")
+                except PresetError as e:
+                    st.error(f"Errore caricamento: {e}")
+
+            # Logica Delete Preset
+            if delete_clicked and selected_preset != "---":
+                try:
+                    delete_preset(selected_preset)
+                    st.success(f"Preset '{selected_preset}' eliminato.")
+                    st.rerun()
+                except PresetError as e:
+                    st.error(f"Errore eliminazione: {e}")
+
+            # Logica Save (mostra dialog)
+            if save_clicked:
+                st.session_state["_show_save_dialog"] = True
+
+            if st.session_state.get("_show_save_dialog"):
+                st.markdown("**Salva configurazione corrente come preset**")
+                new_preset_name = st.text_input("Nome preset", placeholder="es. Vibrazione 50Hz", key="new_preset_name_input")
+                new_preset_desc = st.text_area("Descrizione (opzionale)", placeholder="es. Butterworth LP + FFT...", key="new_preset_desc_input")
+
+                save_col1, save_col2 = st.columns(2)
+                with save_col1:
+                    if st.button("Salva", key="confirm_save_preset"):
+                        if new_preset_name.strip():
+                            st.session_state["_pending_preset_save"] = {
+                                "name": new_preset_name.strip(),
+                                "description": new_preset_desc.strip()
+                            }
+                            st.session_state.pop("_show_save_dialog", None)
+                            st.info("Clicca 'Applica / Plot' per completare il salvataggio del preset.")
+                with save_col2:
+                    if st.button("Annulla", key="cancel_save_preset"):
+                        st.session_state.pop("_show_save_dialog", None)
+                        st.rerun()
+
         submitted = st.form_submit_button("Applica / Plot")
 
     if submitted:
@@ -1124,6 +1214,23 @@ def main():
         ma_window=int(ma_win),
     )
     fftspec = FFTSpec(enabled=bool(enable_fft), detrend=bool(detrend), window="hann")
+
+    # Salva preset se richiesto
+    pending_save = st.session_state.get("_pending_preset_save")
+    if pending_save:
+        try:
+            save_preset(
+                name=pending_save["name"],
+                description=pending_save["description"],
+                fspec=fspec,
+                fftspec=fftspec,
+                manual_fs=manual_fs if manual_fs > 0 else None
+            )
+            st.success(f"Preset '{pending_save['name']}' salvato con successo!")
+            st.session_state.pop("_pending_preset_save", None)
+        except PresetError as e:
+            st.error(f"Impossibile salvare preset: {e}")
+            st.session_state.pop("_pending_preset_save", None)
 
     if fftspec.enabled:
         if not fs_value:
