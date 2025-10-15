@@ -146,6 +146,78 @@ def resolve_fs(x_values, manual_fs: float | None) -> tuple[float | None, str]:
 
 ---
 
+## Data Quality Checks
+
+L'applicazione include controlli automatici di qualità dati non bloccanti che segnalano potenziali problemi senza interrompere il flusso di lavoro.
+
+### Cosa viene controllato
+
+1. **Monotonia dell'asse X**
+   - Rileva timestamp duplicati o valori decrescenti
+   - Segnala violazioni con esempi di indici problematici
+   - Critico per analisi temporali e FFT
+
+2. **Gap nell'asse X (campionamento irregolare)**
+   - Identifica interruzioni nel campionamento dove Δt > k × mediana(Δt)
+   - Soglia configurabile (default: k=5)
+   - Riporta mediana Δt, rapporto del gap e percentuale intervalli impattati
+
+3. **Spike nei valori Y (outlier)**
+   - Usa Z-score robusto basato su mediana e MAD (Median Absolute Deviation)
+   - Soglia configurabile (default: |Z| ≥ 4)
+   - Rileva anche segnali costanti (MAD ≈ 0)
+
+### Configurazione
+
+I parametri si trovano in `config.json`:
+
+```json
+{
+  "quality": {
+    "gap_factor_k": 5.0,      // Moltiplicatore per rilevamento gap
+    "spike_z": 4.0,            // Soglia Z-score per outlier
+    "min_points": 20,          // Punti minimi per controlli robusti
+    "max_examples": 5          // Esempi massimi per issue
+  }
+}
+```
+
+### Interpretazione del report
+
+**Badge di stato:**
+- 🟢 **OK**: Nessun problema rilevato
+- 🟡 **Attenzione**: Uno o più problemi trovati (l'analisi continua comunque)
+
+**Dettagli qualità** (pannello espandibile):
+- Configurazione usata (k, Z, min_points)
+- Note informative (es. dataset corto, uso dell'indice come X)
+- Lista problemi con conteggi, percentuali ed esempi
+
+**Avvisi soft per FFT/filtri:**
+- Se >5% degli intervalli hanno gap, compare una nota che indica "campionamento irregolare"
+- I risultati di FFT e filtri Butterworth potrebbero essere meno affidabili
+
+### Casi limite gestiti
+
+- **Dataset corti** (< min_points): Nota informativa, nessun warning se i dati sono validi
+- **Valori NaN/Inf**: Esclusi dai calcoli, conteggiati nei dettagli
+- **Colonne Y non numeriche**: Coercizione automatica; se fallisce, colonna saltata con nota
+- **X assente**: Usa l'indice DataFrame come X
+- **Segnali costanti**: Identificati separatamente (non come spike)
+
+### Performance
+
+I controlli sono ottimizzati per complessità O(N):
+- Operazioni vettorizzate con pandas/numpy
+- Nessuna iterazione riga per riga
+- Test su 1M righe completati in < 5 secondi
+
+### Note di design
+
+I controlli qualità sono **non bloccanti**: l'applicazione continua a funzionare normalmente anche in presenza di problemi. Gli avvisi servono solo per informare l'utente di potenziali limitazioni nei risultati.
+
+---
+
 ## Troubleshooting & test manuali
 
 | Scenario | Atteso |

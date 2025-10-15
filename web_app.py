@@ -25,6 +25,7 @@ from core.signal_tools import (
     apply_filter,
     compute_fft,
 )
+from core.quality import run_quality_checks, DataQualityReport
 
 # ---------------------- Reset helpers ---------------------- #
 RESETTABLE_KEYS = {
@@ -385,6 +386,137 @@ def _plot_fft(freqs: np.ndarray, amp: np.ndarray, title: str = "FFT") -> go.Figu
     fig.update_layout(title=title, margin=dict(l=40, r=20, t=30, b=40), height=420)
     return fig
 
+# ---------------------- Quality checks ---------------------- #
+def _load_quality_config() -> Dict[str, Any]:
+    """Load quality check configuration from config.json with safe defaults."""
+    import json
+    defaults = {
+        "gap_factor_k": 5.0,
+        "spike_z": 4.0,
+        "min_points": 20,
+        "max_examples": 5
+    }
+    try:
+        config_path = Path("config.json")
+        if config_path.exists():
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+                return config.get("quality", defaults)
+    except Exception:
+        pass
+    return defaults
+
+
+def _render_quality_badge_and_details(report: DataQualityReport) -> None:
+    """Render quality badge and collapsible details panel."""
+    # Badge styling
+    if report.status == 'ok':
+        badge_color = "#28a745"
+        badge_text = "OK"
+        badge_icon = "✓"
+    else:
+        badge_color = "#ffc107"
+        badge_text = "Attenzione"
+        badge_icon = "⚠"
+
+    # Count issues
+    issue_count = len(report.issues)
+    issue_summary = f" ({issue_count} problema{'i' if issue_count != 1 else ''})" if issue_count > 0 else ""
+
+    st.markdown(
+        f"""
+        <div style="display: inline-flex; align-items: center; gap: 8px;
+                    padding: 8px 16px; border-radius: 8px; margin: 8px 0;
+                    background-color: {badge_color}15; border-left: 4px solid {badge_color};">
+            <span style="font-size: 1.2rem;">{badge_icon}</span>
+            <span style="font-weight: 600; color: {badge_color};">
+                Qualità dati: {badge_text}{issue_summary}
+            </span>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    # Details panel - NEVER auto-expand
+    if report.has_issues() or report.notes:
+        with st.expander("📋 Dettagli qualità", expanded=False):
+            # Configuration info
+            st.markdown("**Configurazione controlli:**")
+            config_cols = st.columns(3)
+            config_cols[0].metric("Gap factor (k)", f"{report.config['gap_factor_k']:.1f}")
+            config_cols[1].metric("Soglia Z-score", f"{report.config['spike_z']:.1f}")
+            config_cols[2].metric("Min punti", report.config['min_points'])
+
+            st.markdown("---")
+
+            # Notes
+            if report.notes:
+                st.markdown("**ℹ️ Note informative:**")
+                for note in report.notes:
+                    st.info(note)
+
+            # Issues
+            if report.has_issues():
+                st.markdown("**⚠️ Problemi rilevati:**")
+                for idx, issue in enumerate(report.issues, 1):
+                    with st.container():
+                        if issue.issue_type == 'x_non_monotonic':
+                            st.markdown(f"**{idx}. 🔴 X non monotono**")
+                            st.markdown(
+                                f"- **Violazioni:** {issue.count} ({issue.percentage:.2f}% dei punti)\n"
+                                f"- **Descrizione:** L'asse X contiene valori duplicati o decrescenti"
+                            )
+                            if issue.examples:
+                                with st.expander(f"Mostra {len(issue.examples)} esempi", expanded=False):
+                                    for ex in issue.examples:
+                                        st.code(
+                                            f"Indice {ex['prev_index']} → {ex['index']}: "
+                                            f"{ex['prev_value']} → {ex['value']}",
+                                            language=None
+                                        )
+
+                        elif issue.issue_type == 'x_gap':
+                            median_dt = issue.details.get('median_dt', 'n/a')
+                            k = issue.details.get('gap_factor_k', 'n/a')
+                            st.markdown(f"**{idx}. 🟡 Gap nel campionamento**")
+                            st.markdown(
+                                f"- **Gap rilevati:** {issue.count} ({issue.percentage:.2f}% degli intervalli)\n"
+                                f"- **Δt mediano:** {median_dt:.4g} unità\n"
+                                f"- **Soglia:** {k}× Δt mediano"
+                            )
+                            if issue.examples:
+                                with st.expander(f"Mostra {len(issue.examples)} esempi", expanded=False):
+                                    for ex in issue.examples:
+                                        st.code(
+                                            f"Indice {ex['prev_index']} → {ex['index']}: "
+                                            f"gap={ex['gap_size']:.4g} ({ex['gap_ratio']:.1f}×mediana)",
+                                            language=None
+                                        )
+
+                        elif issue.issue_type == 'y_spike':
+                            median_y = issue.details.get('median', 'n/a')
+                            mad = issue.details.get('mad', 'n/a')
+                            spike_z = issue.details.get('spike_z', 'n/a')
+                            col_name = issue.column or 'n/a'
+                            st.markdown(f"**{idx}. 🔵 Spike in '{col_name}'**")
+                            st.markdown(
+                                f"- **Outlier rilevati:** {issue.count} ({issue.percentage:.2f}% dei punti)\n"
+                                f"- **Mediana:** {median_y:.4g}\n"
+                                f"- **MAD:** {mad:.4g}\n"
+                                f"- **Soglia Z:** {spike_z}"
+                            )
+                            if issue.examples:
+                                with st.expander(f"Mostra {len(issue.examples)} esempi (ordinati per |Z|)", expanded=False):
+                                    for ex in issue.examples:
+                                        st.code(
+                                            f"Indice {ex['index']}: valore={ex['value']:.4g}, "
+                                            f"Z-score={ex['z_score']:.2f}",
+                                            language=None
+                                        )
+
+                        st.markdown("")  # Spacing between issues
+
+
 # --- HEADER pulito (senza riquadro), logo SINISTRA + bottoni piccoli ---
 def render_header():
     import base64, mimetypes
@@ -723,6 +855,30 @@ def main():
         st.success(f"Sample '{sample_name}' caricato.")
     else:
         st.success("File caricato.")
+
+    # Run quality checks
+    quality_config = _load_quality_config()
+    try:
+        # Get all columns for Y checks (use all cols if available)
+        all_cols = list(df.columns)
+        quality_report = run_quality_checks(
+            df=df,
+            x_col=None,  # Will use index, X column will be selected later by user
+            y_cols=all_cols,  # Check all columns for spikes
+            gap_factor_k=quality_config['gap_factor_k'],
+            spike_z=quality_config['spike_z'],
+            min_points=quality_config['min_points'],
+            max_examples=quality_config['max_examples']
+        )
+        # Log summary
+        from core.logger import LogManager
+        logger = LogManager(component="quality").get_logger()
+        logger.info(quality_report.get_summary())
+
+        # Render badge and details
+        _render_quality_badge_and_details(quality_report)
+    except Exception as e:
+        st.warning(f"Impossibile eseguire controlli qualità: {e}")
 
     with st.container():
         suggestion = cleaning_report.suggestion
