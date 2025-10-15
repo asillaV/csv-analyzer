@@ -10,10 +10,13 @@ env/
 venv/
 *.egg-info/
 
-# ===== Logs & temporary files =====
+# ===== Runtime artefacts =====
 logs/
 outputs/
+htmlcov/
+coverage.xml
 tmp_*.csv
+tmp_upload.csv
 *.log
 *.tmp
 *.bak
@@ -62,8 +65,6 @@ tests_csv/
 # ===== Testing & Coverage =====
 .pytest_cache/
 .coverage
-htmlcov/
-coverage.xml
 *.cover
 .hypothesis/
 
