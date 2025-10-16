@@ -1057,72 +1057,6 @@ def main():
     if preset_notice:
         st.info(preset_notice)
 
-    # ---- PRESET CONFIGURAZIONI (FUORI DAL FORM) ----
-    with st.expander("🎯 Preset Configurazioni", expanded=False):
-        st.markdown("Salva e riutilizza configurazioni filtri/FFT frequenti.")
-
-        # Lista preset disponibili
-        try:
-            available_presets = list_presets()
-            preset_names = [p["name"] for p in available_presets]
-        except Exception as e:
-            st.error(f"Errore caricamento preset: {e}")
-            preset_names = []
-
-        # Layout: selectbox + pulsanti
-        pcol1, pcol2, pcol3 = st.columns([3, 1, 1])
-        with pcol1:
-            selected_preset = st.selectbox(
-                "Preset disponibili",
-                options=["---"] + preset_names,
-                key="preset_selector"
-            )
-        with pcol2:
-            load_clicked = st.button("Carica", disabled=selected_preset == "---", key="load_preset_btn")
-        with pcol3:
-            delete_clicked = st.button("Elimina", disabled=selected_preset == "---", key="delete_preset_btn")
-
-        # Logica Load Preset
-        if load_clicked and selected_preset != "---":
-            try:
-                preset_data = load_preset(selected_preset)
-                st.session_state["_loaded_preset"] = preset_data
-                st.session_state["_loaded_preset_name"] = selected_preset
-                # Non fare st.rerun() - lascia che i valori vengano applicati al rendering successivo
-                st.success(f"✅ Preset '{selected_preset}' caricato! I parametri sono ora attivi nel form sottostante.")
-            except PresetError as e:
-                st.error(f"❌ Errore caricamento: {e}")
-
-        # Logica Delete Preset
-        if delete_clicked and selected_preset != "---":
-            try:
-                delete_preset(selected_preset)
-                st.success(f"🗑️ Preset '{selected_preset}' eliminato.")
-                st.rerun()
-            except PresetError as e:
-                st.error(f"❌ Errore eliminazione: {e}")
-
-        st.markdown("---")
-        st.markdown("**Salva configurazione corrente come preset**")
-
-        save_col1, save_col2, save_col3 = st.columns([2, 2, 1])
-        with save_col1:
-            new_preset_name = st.text_input("Nome preset", placeholder="es. Vibrazione 50Hz", key="new_preset_name_input")
-        with save_col2:
-            new_preset_desc = st.text_input("Descrizione (opzionale)", placeholder="es. Butterworth LP + FFT", key="new_preset_desc_input")
-        with save_col3:
-            save_clicked = st.button("Salva", key="save_new_preset_btn")
-
-        if save_clicked:
-            if not new_preset_name.strip():
-                st.warning("Inserisci un nome per il preset.")
-            else:
-                st.session_state["_pending_preset_save"] = {
-                    "name": new_preset_name.strip(),
-                    "description": new_preset_desc.strip()
-                }
-                st.info("ℹ️ Compila il form sottostante e premi 'Applica / Plot' per completare il salvataggio.")
-
     # --- Controlli (form) --- #
     with st.form(f"controls_{st.session_state.get('_controls_nonce', 0)}"):
         x_col = st.selectbox("Colonna X (opzionale)", options=["—"] + cols, index=0)
@@ -1208,6 +1142,72 @@ def main():
             )
 
         submitted = st.form_submit_button("Applica / Plot")
+
+    # ---- PRESET CONFIGURAZIONI (FUORI DAL FORM) ----
+    with st.expander("🎯 Preset Configurazioni", expanded=False):
+        st.markdown("Salva e riutilizza configurazioni filtri/FFT frequenti.")
+
+        # Lista preset disponibili
+        try:
+            available_presets = list_presets()
+            preset_names = [p["name"] for p in available_presets]
+        except Exception as e:
+            st.error(f"Errore caricamento preset: {e}")
+            preset_names = []
+
+        # Layout: selectbox + pulsanti
+        pcol1, pcol2, pcol3 = st.columns([3, 1, 1])
+        with pcol1:
+            selected_preset = st.selectbox(
+                "Preset disponibili",
+                options=["---"] + preset_names,
+                key="preset_selector"
+            )
+        with pcol2:
+            load_clicked = st.button("Carica", disabled=selected_preset == "---", key="load_preset_btn")
+        with pcol3:
+            delete_clicked = st.button("Elimina", disabled=selected_preset == "---", key="delete_preset_btn")
+
+        # Logica Load Preset
+        if load_clicked and selected_preset != "---":
+            try:
+                preset_data = load_preset(selected_preset)
+                st.session_state["_loaded_preset"] = preset_data
+                st.session_state["_loaded_preset_name"] = selected_preset
+                # Non fare st.rerun() - lascia che i valori vengano applicati al rendering successivo
+                st.success(f"✅ Preset '{selected_preset}' caricato! I parametri sono ora attivi nel form sottostante.")
+            except PresetError as e:
+                st.error(f"❌ Errore caricamento: {e}")
+
+        # Logica Delete Preset
+        if delete_clicked and selected_preset != "---":
+            try:
+                delete_preset(selected_preset)
+                st.success(f"🗑️ Preset '{selected_preset}' eliminato.")
+                st.rerun()
+            except PresetError as e:
+                st.error(f"❌ Errore eliminazione: {e}")
+
+        st.markdown("---")
+        st.markdown("**Salva configurazione corrente come preset**")
+
+        save_col1, save_col2, save_col3 = st.columns([2, 2, 1])
+        with save_col1:
+            new_preset_name = st.text_input("Nome preset", placeholder="es. Vibrazione 50Hz", key="new_preset_name_input")
+        with save_col2:
+            new_preset_desc = st.text_input("Descrizione (opzionale)", placeholder="es. Butterworth LP + FFT", key="new_preset_desc_input")
+        with save_col3:
+            save_clicked = st.button("Salva", key="save_new_preset_btn")
+
+        if save_clicked:
+            if not new_preset_name.strip():
+                st.warning("Inserisci un nome per il preset.")
+            else:
+                st.session_state["_pending_preset_save"] = {
+                    "name": new_preset_name.strip(),
+                    "description": new_preset_desc.strip()
+                }
+                st.info("ℹ️ Compila il form sottostante e premi 'Applica / Plot' per completare il salvataggio.")
 
     if submitted:
         st.session_state["_plots_ready"] = True
