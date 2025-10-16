@@ -916,7 +916,7 @@ def main():
     except Exception as e:
         st.warning(f"Impossibile eseguire controlli qualità: {e}")
 
-    with st.container():
+    with st.expander("📋 Dettagli dati", expanded=False): 
         suggestion = cleaning_report.suggestion
         info_cols = st.columns(4)
         info_cols[0].markdown(
@@ -1144,7 +1144,7 @@ def main():
         submitted = st.form_submit_button("Applica / Plot")
 
     # ---- PRESET CONFIGURAZIONI (FUORI DAL FORM) ----
-    with st.expander("🎯 Preset Configurazioni", expanded=False):
+    with st.expander("Preset Configurazioni", expanded=False):
         st.markdown("Salva e riutilizza configurazioni filtri/FFT frequenti.")
 
         # Lista preset disponibili
@@ -1164,8 +1164,10 @@ def main():
                 key="preset_selector"
             )
         with pcol2:
+            st.markdown("<br>", unsafe_allow_html=True) # per allineare al centro il bottone
             load_clicked = st.button("Carica", disabled=selected_preset == "---", key="load_preset_btn")
         with pcol3:
+            st.markdown("<br>", unsafe_allow_html=True) # per allineare al centro il bottone
             delete_clicked = st.button("Elimina", disabled=selected_preset == "---", key="delete_preset_btn")
 
         # Logica Load Preset
@@ -1197,6 +1199,7 @@ def main():
         with save_col2:
             new_preset_desc = st.text_input("Descrizione (opzionale)", placeholder="es. Butterworth LP + FFT", key="new_preset_desc_input")
         with save_col3:
+            st.markdown("<br>", unsafe_allow_html=True) # per allineare al centro il bottone
             save_clicked = st.button("Salva", key="save_new_preset_btn")
 
         if save_clicked:
@@ -1655,6 +1658,7 @@ def main():
             key="report_base_name",
         )
     with col_r2:
+        st.markdown("<br>", unsafe_allow_html=True) # per allineare al centro il bottone
         if st.button("Genera report"):
             try:
                 manager = ReportManager()
