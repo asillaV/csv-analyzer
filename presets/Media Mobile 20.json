@@ -1,0 +1,19 @@
+{
+  "version": "1.0",
+  "name": "Media Mobile 20",
+  "description": "Smoothing intenso con media mobile a 20 campioni",
+  "created_at": "2025-10-15T19:15:08.046642",
+  "manual_fs": null,
+  "filter": {
+    "kind": "ma",
+    "enabled": true,
+    "order": 4,
+    "cutoff": null,
+    "ma_window": 20
+  },
+  "fft": {
+    "enabled": false,
+    "detrend": false,
+    "window": "hann"
+  }
+}

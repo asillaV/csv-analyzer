@@ -26,6 +26,16 @@ from core.signal_tools import (
     compute_fft,
 )
 from core.quality import run_quality_checks, DataQualityReport
+from core.preset_manager import (
+    save_preset,
+    load_preset,
+    list_presets,
+    delete_preset,
+    preset_exists,
+    create_default_presets,
+    PresetError,
+)
+from core.logger import LogManager
 
 # ---------------------- Reset helpers ---------------------- #
 RESETTABLE_KEYS = {
@@ -46,9 +56,7 @@ RESETTABLE_KEYS = {
     "f_lo",
     "f_hi",
     "overlay_orig",
-    # "enable_fft" removed: widget has no key, resets automatically with form nonce
-    "fft_use",
-    "detrend",
+    # Note: enable_fft, fft_use, detrend removed: widgets have no key, reset automatically with form nonce
     # Report testuale
     "report_format",
     "report_base_name",
@@ -202,6 +210,11 @@ def _reset_all_settings() -> None:
 
     # Reset quality mode to default
     st.session_state.pop("_quality_file_sig", None)
+
+    # Reset preset state
+    st.session_state.pop("_loaded_preset", None)
+    st.session_state.pop("_loaded_preset_name", None)
+    st.session_state.pop("_pending_preset_save", None)
 
     st.session_state["_controls_nonce"] = st.session_state.get("_controls_nonce", 0) + 1
 
@@ -658,6 +671,14 @@ def _sync_visual_spec_state(selection: Sequence[str], default_x_label: str) -> N
 
 def main():
     st.set_page_config(page_title="Analizzatore CSV — Web", layout="wide")
+
+    # Inizializza preset di default all'avvio
+    try:
+        create_default_presets()
+    except Exception as e:
+        logger = LogManager(component="preset").get_logger()
+        logger.warning(f"Impossibile creare preset default: {e}")
+
     render_header()
 
     st.caption("Upload CSV → seleziona X/Y → limiti assi → Advanced (fs/filtri/FFT) → report")
@@ -716,11 +737,17 @@ def main():
             type=["csv"],
             key="file_upload",
         )
+        sample_disabled = not sample_available or upload is not None
+        sample_help = (
+            "Devi eliminare il CSV in memoria prima di caricare il sample."
+            if upload is not None
+            else "Carica un dataset demo multi-canale (segnale + rumore)."
+        )
         sample_clicked = st.button(
             "Carica sample",
             key="load_sample",
-            disabled=not sample_available,
-            help="Carica un dataset demo multi-canale (segnale + rumore).",
+            disabled=sample_disabled,
+            help=sample_help,
         )
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -732,6 +759,15 @@ def main():
                 st.session_state["_sample_file_name"] = SAMPLE_CSV_PATH.name
                 st.session_state["_clear_file_uploader"] = True
                 st.session_state.pop("_sample_error", None)
+
+                # FIX #46: Libera TUTTA la cache upload prima del rerun
+                st.session_state.pop("_cached_df", None)
+                st.session_state.pop("_cached_cleaning_report", None)
+                st.session_state.pop("_cached_meta", None)
+                st.session_state.pop("_cached_file_sig", None)
+                st.session_state.pop("_cached_apply_cleaning", None)
+                _invalidate_result_caches()  # Pulisce filter/FFT cache
+
                 st.rerun()
             except Exception as exc:
                 st.session_state.pop("_sample_bytes", None)
@@ -771,7 +807,7 @@ def main():
 
     apply_cleaning = st.checkbox(
         "Applica correzione suggerita",
-        value=True,
+        value=False,
         key="_apply_cleaning",
         help="Rimuove separatori migliaia/decimali incoerenti e converte le colonne numeriche.",
     )
@@ -880,7 +916,7 @@ def main():
     except Exception as e:
         st.warning(f"Impossibile eseguire controlli qualità: {e}")
 
-    with st.container():
+    with st.expander("📋 Dettagli dati", expanded=False): 
         suggestion = cleaning_report.suggestion
         info_cols = st.columns(4)
         info_cols[0].markdown(
@@ -957,6 +993,70 @@ def main():
     cols = meta.get("columns", list(df.columns))
     fft_available = total_rows >= MIN_ROWS_FOR_FFT
 
+    # Preset defaults for Advanced form
+    filter_kind_options = [
+        "Media mobile (MA)",
+        "Butterworth LP",
+        "Butterworth HP",
+        "Butterworth BP",
+    ]
+    preset_manual_fs = 0.0
+    preset_enable_filter = False
+    preset_filter_kind_idx = 0
+    preset_ma_win = 5
+    preset_filter_order = 4
+    preset_f_lo = ""
+    preset_f_hi = ""
+    preset_enable_fft = False
+    preset_detrend = True
+    preset_save_message: Optional[str] = st.session_state.pop("_preset_save_message", None)
+    preset_notice: Optional[str] = None
+
+    # Carica preset se presente (NON fare pop - mantieni finché non viene fatto submit)
+    if "_loaded_preset" in st.session_state:
+        preset_data = st.session_state["_loaded_preset"]
+        preset_name = st.session_state.get("_loaded_preset_name", "")
+        preset_notice = f"📂 Preset '{preset_name}' caricato. Compila il form e premi 'Applica / Plot'."
+
+        manual_from_preset = preset_data.get("manual_fs")
+        if manual_from_preset is not None:
+            try:
+                preset_manual_fs = float(manual_from_preset)
+            except (TypeError, ValueError):
+                preset_manual_fs = 0.0
+
+        fspec_loaded = preset_data.get("filter_spec")
+        if isinstance(fspec_loaded, FilterSpec):
+            preset_enable_filter = bool(fspec_loaded.enabled)
+            kind_to_index = {"ma": 0, "butter_lp": 1, "butter_hp": 2, "butter_bp": 3}
+            preset_filter_kind_idx = kind_to_index.get(fspec_loaded.kind, 0)
+            try:
+                preset_ma_win = int(fspec_loaded.ma_window)
+            except (TypeError, ValueError):
+                pass
+            try:
+                preset_filter_order = int(fspec_loaded.order)
+            except (TypeError, ValueError):
+                pass
+            cutoff_loaded = fspec_loaded.cutoff or (None, None)
+            if isinstance(cutoff_loaded, tuple):
+                lo_val, hi_val = cutoff_loaded
+            else:
+                lo_val, hi_val = (None, None)
+            preset_f_lo = "" if lo_val in (None, "") else str(lo_val)
+            preset_f_hi = "" if hi_val in (None, "") else str(hi_val)
+
+        fftspec_loaded = preset_data.get("fft_spec")
+        if isinstance(fftspec_loaded, FFTSpec):
+            preset_enable_fft = bool(fftspec_loaded.enabled)
+            preset_detrend = bool(fftspec_loaded.detrend)
+
+    if preset_save_message:
+        st.success(preset_save_message)
+
+    if preset_notice:
+        st.info(preset_notice)
+
     # --- Controlli (form) --- #
     with st.form(f"controls_{st.session_state.get('_controls_nonce', 0)}"):
         x_col = st.selectbox("Colonna X (opzionale)", options=["—"] + cols, index=0)
@@ -986,25 +1086,27 @@ def main():
             # fs manuale in cima
             manual_fs = st.number_input(
                 "Frequenza di campionamento manuale (Hz)",
-                min_value=0.0, value=0.0, step=0.1,
+                min_value=0.0,
+                value=float(preset_manual_fs),
+                step=0.1,
                 help=">0 forza la fs; 0 = stima automatica dalla X"
             )
             st.caption("Filtri Butterworth e FFT useranno la stessa fs (manuale o stimata).")
 
-            enable_filter = st.checkbox("Abilita filtro", value=False)
+            enable_filter = st.checkbox("Abilita filtro", value=preset_enable_filter)
             f_kind = st.selectbox(
                 "Tipo filtro",
-                ["Media mobile (MA)", "Butterworth LP", "Butterworth HP", "Butterworth BP"],
-                index=0,
+                filter_kind_options,
+                index=preset_filter_kind_idx,
             )
-            ma_win = st.number_input("MA - finestra (campioni)", min_value=1, value=5, step=1)
-            f_order = st.number_input("Butterworth - ordine", min_value=1, value=4, step=1)
+            ma_win = st.number_input("MA - finestra (campioni)", min_value=1, value=int(preset_ma_win), step=1)
+            f_order = st.number_input("Butterworth - ordine", min_value=1, value=int(preset_filter_order), step=1)
 
             cc1, cc2 = st.columns(2)
             with cc1:
-                f_lo = st.text_input("Cutoff low (Hz) - LP/HP/BP", placeholder="es. 5")
+                f_lo = st.text_input("Cutoff low (Hz) - LP/HP/BP", value=preset_f_lo, placeholder="es. 5")
             with cc2:
-                f_hi = st.text_input("Cutoff high (Hz) - solo BP", placeholder="es. 20")
+                f_hi = st.text_input("Cutoff high (Hz) - solo BP", value=preset_f_hi, placeholder="es. 20")
 
             overlay_orig = st.checkbox("Sovrapponi originale e filtrato", value=True)
 
@@ -1018,7 +1120,7 @@ def main():
             # No key= parameter: widget state is local to the form, resets automatically
             enable_fft = st.checkbox(
                 "Calcola FFT",
-                value=False,
+                value=preset_enable_fft,
                 disabled=not fft_available,
                 help=fft_help,
             )
@@ -1031,20 +1133,90 @@ def main():
                 "FFT su",
                 ["Filtrato (se attivo)", "Originale"],
                 horizontal=True,
-                key="fft_use",
                 disabled=not fft_available,
             )
             detrend = st.checkbox(
                 "Detrend (togli media)",
-                value=True,
-                key="detrend",
+                value=preset_detrend,
                 disabled=not fft_available,
             )
 
         submitted = st.form_submit_button("Applica / Plot")
 
+    # ---- PRESET CONFIGURAZIONI (FUORI DAL FORM) ----
+    with st.expander("Preset Configurazioni", expanded=False):
+        st.markdown("Salva e riutilizza configurazioni filtri/FFT frequenti.")
+
+        # Lista preset disponibili
+        try:
+            available_presets = list_presets()
+            preset_names = [p["name"] for p in available_presets]
+        except Exception as e:
+            st.error(f"Errore caricamento preset: {e}")
+            preset_names = []
+
+        # Layout: selectbox + pulsanti
+        pcol1, pcol2, pcol3 = st.columns([3, 1, 1])
+        with pcol1:
+            selected_preset = st.selectbox(
+                "Preset disponibili",
+                options=["---"] + preset_names,
+                key="preset_selector"
+            )
+        with pcol2:
+            st.markdown("<br>", unsafe_allow_html=True) # per allineare al centro il bottone
+            load_clicked = st.button("Carica", disabled=selected_preset == "---", key="load_preset_btn")
+        with pcol3:
+            st.markdown("<br>", unsafe_allow_html=True) # per allineare al centro il bottone
+            delete_clicked = st.button("Elimina", disabled=selected_preset == "---", key="delete_preset_btn")
+
+        # Logica Load Preset
+        if load_clicked and selected_preset != "---":
+            try:
+                preset_data = load_preset(selected_preset)
+                st.session_state["_loaded_preset"] = preset_data
+                st.session_state["_loaded_preset_name"] = selected_preset
+                # Non fare st.rerun() - lascia che i valori vengano applicati al rendering successivo
+                st.success(f"✅ Preset '{selected_preset}' caricato! I parametri sono ora attivi nel form sottostante.")
+            except PresetError as e:
+                st.error(f"❌ Errore caricamento: {e}")
+
+        # Logica Delete Preset
+        if delete_clicked and selected_preset != "---":
+            try:
+                delete_preset(selected_preset)
+                st.success(f"🗑️ Preset '{selected_preset}' eliminato.")
+                st.rerun()
+            except PresetError as e:
+                st.error(f"❌ Errore eliminazione: {e}")
+
+        st.markdown("---")
+        st.markdown("**Salva configurazione corrente come preset**")
+
+        save_col1, save_col2, save_col3 = st.columns([2, 2, 1])
+        with save_col1:
+            new_preset_name = st.text_input("Nome preset", placeholder="es. Vibrazione 50Hz", key="new_preset_name_input")
+        with save_col2:
+            new_preset_desc = st.text_input("Descrizione (opzionale)", placeholder="es. Butterworth LP + FFT", key="new_preset_desc_input")
+        with save_col3:
+            st.markdown("<br>", unsafe_allow_html=True) # per allineare al centro il bottone
+            save_clicked = st.button("Salva", key="save_new_preset_btn")
+
+        if save_clicked:
+            if not new_preset_name.strip():
+                st.warning("Inserisci un nome per il preset.")
+            else:
+                st.session_state["_pending_preset_save"] = {
+                    "name": new_preset_name.strip(),
+                    "description": new_preset_desc.strip()
+                }
+                st.info("ℹ️ Compila il form sottostante e premi 'Applica / Plot' per completare il salvataggio.")
+
     if submitted:
         st.session_state["_plots_ready"] = True
+        # Pulisci il preset caricato dopo il submit per evitare che rimanga attivo
+        st.session_state.pop("_loaded_preset", None)
+        st.session_state.pop("_loaded_preset_name", None)
 
     if not st.session_state.get("_plots_ready"):
         st.info("Compila il form e premi 'Applica / Plot' per visualizzare grafici e report.")
@@ -1109,6 +1281,27 @@ def main():
         ma_window=int(ma_win),
     )
     fftspec = FFTSpec(enabled=bool(enable_fft), detrend=bool(detrend), window="hann")
+
+    # Salva preset se richiesto
+    pending_save = st.session_state.get("_pending_preset_save")
+    if submitted and pending_save:
+        try:
+            save_preset(
+                name=pending_save["name"],
+                description=pending_save["description"],
+                fspec=fspec,
+                fftspec=fftspec,
+                manual_fs=manual_fs if manual_fs > 0 else None
+            )
+            st.session_state.pop("_pending_preset_save", None)
+            st.session_state["_preset_save_message"] = f"💾 Preset '{pending_save['name']}' salvato con successo!"
+            st.rerun()
+        except PresetError as e:
+            st.error(f"❌ Impossibile salvare preset: {e}")
+            st.session_state.pop("_pending_preset_save", None)
+        except Exception as exc:
+            st.error(f"❌ Errore inatteso salvataggio preset: {exc}")
+            st.session_state.pop("_pending_preset_save", None)
 
     if fftspec.enabled:
         if not fs_value:
@@ -1465,6 +1658,7 @@ def main():
             key="report_base_name",
         )
     with col_r2:
+        st.markdown("<br>", unsafe_allow_html=True) # per allineare al centro il bottone
         if st.button("Genera report"):
             try:
                 manager = ReportManager()
@@ -1646,4 +1840,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
