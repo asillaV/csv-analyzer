@@ -1,10 +1,12 @@
 ﻿from __future__ import annotations
 
+import hashlib
 import inspect
 from pathlib import Path
-import hashlib
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+import uuid
 
 import numpy as np
 import pandas as pd
@@ -36,6 +38,8 @@ from core.preset_manager import (
     PresetError,
 )
 from core.logger import LogManager
+
+FileSignature = Tuple[str, int, str]
 
 # ---------------------- Reset helpers ---------------------- #
 RESETTABLE_KEYS = {
@@ -80,6 +84,23 @@ MAX_FILTER_CACHE_SIZE = 32
 MAX_FFT_CACHE_SIZE = 16
 
 
+# ---------------------- Session helpers (Issue #49) ---------------------- #
+def _ensure_session_id() -> str:
+    """Return the per-session identifier, initializing it on first access."""
+    key = "dataset_id"
+    if key not in st.session_state:
+        st.session_state[key] = uuid.uuid4().hex
+    return st.session_state[key]
+
+
+def _build_file_signature(file_bytes: bytes) -> FileSignature:
+    """Create a file signature bound to the current session."""
+    session_id = _ensure_session_id()
+    size = len(file_bytes)
+    digest = hashlib.sha1(file_bytes).hexdigest()[:16]
+    return (session_id, size, digest)
+
+
 # ---------------------- Cache helpers (Issue #35) ---------------------- #
 def _init_result_caches() -> None:
     """Initialize cache dictionaries in session state if not present."""
@@ -90,7 +111,7 @@ def _init_result_caches() -> None:
 
 
 def _get_filter_cache_key(
-    column: str, file_sig: Tuple, fspec: FilterSpec, fs: Optional[float], fs_source: Optional[str]
+    column: str, file_sig: FileSignature, fspec: FilterSpec, fs: Optional[float], fs_source: Optional[str]
 ) -> Tuple:
     """Generate hashable cache key for filter results."""
     from dataclasses import astuple
@@ -99,7 +120,7 @@ def _get_filter_cache_key(
 
 
 def _get_fft_cache_key(
-    column: str, file_sig: Tuple, is_filtered: bool, fftspec: FFTSpec, fs: float, fs_source: Optional[str]
+    column: str, file_sig: FileSignature, is_filtered: bool, fftspec: FFTSpec, fs: float, fs_source: Optional[str]
 ) -> Tuple:
     """Generate hashable cache key for FFT results."""
     from dataclasses import astuple
@@ -149,7 +170,7 @@ def _apply_filter_cached(
     fspec: FilterSpec,
     fs_value: Optional[float],
     fs_source: Optional[str],
-    file_sig: Tuple,
+    file_sig: FileSignature,
     column_name: str,
 ) -> Optional[pd.Series]:
     """Apply filter with caching. Returns filtered series or None if filter fails."""
@@ -172,7 +193,7 @@ def _compute_fft_cached(
     fs_value: float,
     fs_source: Optional[str],
     fftspec: FFTSpec,
-    file_sig: Tuple,
+    file_sig: FileSignature,
     column_name: str,
     is_filtered: bool,
 ) -> Tuple[np.ndarray, np.ndarray]:
@@ -670,7 +691,8 @@ def _sync_visual_spec_state(selection: Sequence[str], default_x_label: str) -> N
 
 
 def main():
-    st.set_page_config(page_title="Analizzatore CSV — Web", layout="wide")
+    _ensure_session_id()
+    st.set_page_config(page_title="Analizzatore CSV - Web", layout="wide")
 
     # Inizializza preset di default all'avvio
     try:
@@ -829,7 +851,7 @@ def main():
         file_bytes = upload_bytes
         upload.seek(0)
 
-    file_sig = (len(file_bytes), hashlib.sha1(file_bytes).hexdigest())
+    file_sig = _build_file_signature(file_bytes)
 
     cached_df = st.session_state.get("_cached_df")
     cached_report = st.session_state.get("_cached_cleaning_report")

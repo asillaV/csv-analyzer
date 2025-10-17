@@ -5,10 +5,11 @@ Issue #46: Verifica che sample e upload non si contaminino a vicenda.
 """
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
-import hashlib
+from unittest.mock import patch
 
 import pytest
+
+from web_app import _build_file_signature
 
 
 @pytest.fixture
@@ -142,24 +143,31 @@ def test_no_file_loaded(mock_streamlit):
     assert current_file is None
 
 
-def test_file_signature_generation():
+def test_file_signature_generation(mock_streamlit):
     """
-    Verifica che file_sig (size, hash) sia univoco per ogni file.
+    Verifica che file_sig tenga conto della sessione e del contenuto del file.
 
     Issue #46: Cache deve invalidarsi quando file_sig cambia.
     """
     file1_bytes = b"time,value\n1,10\n2,20\n"
     file2_bytes = b"time,value\n1,10\n2,21\n"  # Ultimo valore diverso
-    sample_bytes = b"x,y\n1,2\n3,4\n"
+    mock_streamlit["dataset_id"] = "session-a"
 
-    file1_sig = (len(file1_bytes), hashlib.sha1(file1_bytes).hexdigest())
-    file2_sig = (len(file2_bytes), hashlib.sha1(file2_bytes).hexdigest())
-    sample_sig = (len(sample_bytes), hashlib.sha1(sample_bytes).hexdigest())
+    file1_sig = _build_file_signature(file1_bytes)
+    file2_sig = _build_file_signature(file2_bytes)
+    duplicate_sig_same_session = _build_file_signature(file1_bytes)
 
-    # Assertions
+    assert file1_sig[0] == "session-a", "La firma deve includere l'ID sessione corrente"
+    assert file1_sig == duplicate_sig_same_session, "La stessa sessione e contenuto devono produrre la stessa firma"
     assert file1_sig != file2_sig, "File con contenuto diverso devono avere sig diverse"
-    assert file1_sig != sample_sig, "Sample deve avere sig diversa da upload"
-    assert len(set([file1_sig, file2_sig, sample_sig])) == 3, "Tutte le sig devono essere uniche"
+
+    # Simula nuova sessione con stesso file
+    mock_streamlit.clear()
+    mock_streamlit["dataset_id"] = "session-b"
+    file1_sig_other_session = _build_file_signature(file1_bytes)
+
+    assert file1_sig_other_session[0] == "session-b"
+    assert file1_sig_other_session != file1_sig, "La stessa sorgente deve avere firma diversa tra sessioni"
 
 
 def test_cache_invalidation_on_file_change(mock_streamlit):
@@ -170,7 +178,8 @@ def test_cache_invalidation_on_file_change(mock_streamlit):
     """
     # Setup: simula cache popolata con file A
     file_a_bytes = b"a,b\n1,2\n"
-    file_a_sig = (len(file_a_bytes), hashlib.sha1(file_a_bytes).hexdigest())
+    mock_streamlit["dataset_id"] = "session-cache"
+    file_a_sig = _build_file_signature(file_a_bytes)
 
     mock_streamlit["_cached_df"] = "fake_dataframe_A"
     mock_streamlit["_cached_file_sig"] = file_a_sig
@@ -178,7 +187,6 @@ def test_cache_invalidation_on_file_change(mock_streamlit):
 
     # Simula caricamento sample (file diverso)
     sample_bytes = b"x,y\n1,2,3\n3,4,5\n"
-    sample_sig = (len(sample_bytes), hashlib.sha1(sample_bytes).hexdigest())
     sample_name = "sample.csv"
 
     current_file = SimpleNamespace(name=sample_name, size=len(sample_bytes))
