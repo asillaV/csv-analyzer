@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 import pytest
 
-from web_app import _build_file_signature
+from web_app import _build_file_signature, _meta_info_html
 
 
 @pytest.fixture
@@ -168,6 +168,17 @@ def test_file_signature_generation(mock_streamlit):
 
     assert file1_sig_other_session[0] == "session-b"
     assert file1_sig_other_session != file1_sig, "La stessa sorgente deve avere firma diversa tra sessioni"
+
+
+def test_xss_column_name():
+    """
+    Assicura che il markup HTML per i metadati sia sanificato.
+    """
+    raw_name = "<script>alert(1)</script>"
+    html_markup = _meta_info_html("Colonna", raw_name)
+
+    assert "<script>" not in html_markup
+    assert "&lt;script&gt;" in html_markup
 
 
 def test_cache_invalidation_on_file_change(mock_streamlit):
