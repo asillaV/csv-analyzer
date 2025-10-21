@@ -4,5 +4,11 @@
     "spike_z": 4.0,
     "min_points": 20,
     "max_examples": 5
+  },
+  "limits": {
+    "max_file_mb": 100,
+    "max_rows": 1000000,
+    "max_cols": 500,
+    "parse_timeout_s": 30
   }
 }

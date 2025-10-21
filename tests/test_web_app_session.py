@@ -3,12 +3,14 @@ Test per session state management in web_app.py
 
 Issue #46: Verifica che sample e upload non si contaminino a vicenda.
 """
+import queue
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
+import web_app
 from web_app import _build_file_signature, _meta_info_html
 
 
@@ -278,3 +280,56 @@ def test_sample_load_integration_flow(tmp_path):
         assert current_file is not None, f"Stato {idx}: current_file non deve essere None"
         assert current_file.name == state["expected_file"], \
             f"Stato {idx}: file errato. Atteso {state['expected_file']}, ottenuto {current_file.name}"
+
+
+def test_reject_large_file():
+    """
+    I file oltre il limite configurato devono essere rifiutati.
+    """
+    limits = {
+        "max_file_mb": 1.0,
+        "max_rows": 10_000,
+        "max_cols": 100,
+        "parse_timeout_s": 30,
+    }
+
+    big_file_size = 2 * 1024 * 1024  # 2 MB
+    small_file_size = 256 * 1024  # 256 KB
+
+    from web_app import _check_size_limit
+
+    assert _check_size_limit(big_file_size, limits) is not None
+    assert _check_size_limit(small_file_size, limits) is None
+
+
+def test_parse_cleanup_on_exception(monkeypatch):
+    """
+    Anche in caso di eccezione il file temporaneo deve essere rimosso.
+    """
+    created_paths = []
+    real_mkstemp = web_app.tempfile.mkstemp
+
+    def fake_mkstemp(*args, **kwargs):
+        fd, path = real_mkstemp(*args, **kwargs)
+        created_paths.append(Path(path))
+        return fd, path
+
+    class FailingContext:
+        def Queue(self):
+            return queue.Queue()
+
+        def Process(self, *args, **kwargs):
+            raise RuntimeError("process boom")
+
+    monkeypatch.setattr(web_app.tempfile, "mkstemp", fake_mkstemp)
+    monkeypatch.setattr(web_app.mp, "get_context", lambda _: FailingContext())
+
+    with pytest.raises(RuntimeError):
+        web_app._parse_csv_with_timeout(
+            file_bytes=b"col\n1\n",
+            apply_cleaning=False,
+            timeout_s=1.0,
+        )
+
+    for path in created_paths:
+        assert not path.exists(), f"Temporary file '{path}' should have been removed"

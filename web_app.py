@@ -3,6 +3,11 @@
 import hashlib
 import html
 import inspect
+import multiprocessing as mp
+import os
+import queue
+import tempfile
+from functools import lru_cache
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -78,6 +83,134 @@ MIN_ROWS_FOR_FFT = 128
 PERFORMANCE_THRESHOLD = 100_000
 PERFORMANCE_MAX_POINTS = 10_000
 PERFORMANCE_METHOD = "lttb"
+
+LIMIT_DEFAULTS = {
+    "max_file_mb": 100,
+    "max_rows": 1_000_000,
+    "max_cols": 500,
+    "parse_timeout_s": 30,
+}
+
+
+@lru_cache(maxsize=1)
+def _load_limits_config() -> Dict[str, float]:
+    """Legge i limiti di caricamento da config.json con fallback sicuri."""
+    import json
+
+    merged: Dict[str, float] = dict(LIMIT_DEFAULTS)
+    config_path = Path("config.json")
+    try:
+        if config_path.exists():
+            with open(config_path, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+                limits = data.get("limits") or {}
+                for key, default in LIMIT_DEFAULTS.items():
+                    value = limits.get(key)
+                    if isinstance(value, (int, float)):
+                        merged[key] = float(value)
+    except Exception:
+        # In caso di problemi con il file di config, manteniamo i default.
+        pass
+    return merged
+
+
+def _check_size_limit(size_bytes: int, limits: Dict[str, float]) -> Optional[str]:
+    """Ritorna un messaggio di errore se la dimensione supera i limiti."""
+    if size_bytes <= 0:
+        return "Il file caricato è vuoto."
+    max_bytes = limits["max_file_mb"] * 1024 * 1024
+    if size_bytes > max_bytes:
+        return (
+            f"File troppo grande ({size_bytes / (1024**2):.1f} MB). "
+            f"Limite massimo: {limits['max_file_mb']:.0f} MB."
+        )
+    return None
+
+
+def _check_dataframe_limits(df: pd.DataFrame, limits: Dict[str, float]) -> Optional[str]:
+    """Verifica che il dataframe rispetti i limiti di righe e colonne."""
+    max_rows = int(limits["max_rows"])
+    max_cols = int(limits["max_cols"])
+    if len(df) > max_rows:
+        return (
+            f"Dataset troppo grande: {len(df):,} righe. "
+            f"Limite massimo consentito: {max_rows:,}."
+        )
+    if len(df.columns) > max_cols:
+        return (
+            f"Dataset con troppe colonne: {len(df.columns):,}. "
+            f"Limite massimo consentito: {max_cols:,}."
+        )
+    return None
+
+
+def _clear_cached_dataset() -> None:
+    """Rimuove dataframe e metadati cache dalla sessione."""
+    st.session_state.pop("_cached_df", None)
+    st.session_state.pop("_cached_cleaning_report", None)
+    st.session_state.pop("_cached_meta", None)
+    st.session_state.pop("_cached_file_sig", None)
+    st.session_state.pop("_cached_apply_cleaning", None)
+
+
+def _parsing_worker(result_queue: "mp.Queue", file_path: str, apply_cleaning: bool) -> None:
+    """Worker che analizza e carica il CSV, inviando il risultato tramite coda."""
+    try:
+        meta = analyze_csv(file_path)
+        df, cleaning_report = load_csv(
+            file_path,
+            encoding=meta.get("encoding"),
+            delimiter=meta.get("delimiter"),
+            header=meta.get("header"),
+            apply_cleaning=apply_cleaning,
+            return_details=True,
+        )
+        result_queue.put(("ok", meta, df, cleaning_report))
+    except Exception as exc:  # pragma: no cover - il messaggio viene gestito dal caller
+        result_queue.put(("error", exc))
+
+
+def _parse_csv_with_timeout(file_bytes: bytes, apply_cleaning: bool, timeout_s: float) -> Tuple[pd.DataFrame, CleaningReport, Dict[str, Any]]:
+    """Esegue analyze + load in un processo separato e applica un timeout."""
+    ctx = mp.get_context("spawn")
+    result_queue: mp.Queue = ctx.Queue()
+    fd, tmp_name = tempfile.mkstemp(prefix="csv_upload_", suffix=".csv")
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as tmp_file:
+            tmp_file.write(file_bytes)
+
+        process = ctx.Process(
+            target=_parsing_worker,
+            args=(result_queue, str(tmp_path), apply_cleaning),
+            daemon=True,
+        )
+        process.start()
+
+        try:
+            message = result_queue.get(timeout=timeout_s)
+        except queue.Empty:
+            process.terminate()
+            process.join()
+            raise TimeoutError(
+                f"Parsing del CSV oltre il tempo massimo di {timeout_s:.0f}s."
+            ) from None
+
+        process.join()
+        status = message[0]
+        if status == "ok":
+            _, meta, df, cleaning_report = message
+            return df, cleaning_report, dict(meta)
+
+        error = message[1] if len(message) > 1 else RuntimeError("Errore sconosciuto nel parsing.")
+        if isinstance(error, Exception):
+            raise error
+        raise RuntimeError(str(error))
+    finally:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
 SAMPLE_CSV_PATH = Path("assets/sample_timeseries.csv")
 
 # Cache limits
@@ -838,6 +971,8 @@ def main():
 
     using_sample = upload is None
 
+    limits = _load_limits_config()
+
     apply_cleaning = st.checkbox(
         "Applica correzione suggerita",
         value=False,
@@ -845,16 +980,27 @@ def main():
         help="Rimuove separatori migliaia/decimali incoerenti e converte le colonne numeriche.",
     )
 
-    tmp_path = Path("tmp_upload.csv")
     cleaning_report: Optional[CleaningReport] = None
     meta: Dict[str, Any]
+    file_bytes: bytes
 
     if using_sample:
         if sample_bytes is None:
             st.error("Sample non disponibile.")
             return
+        size_error = _check_size_limit(len(sample_bytes), limits)
+        if size_error:
+            _clear_cached_dataset()
+            st.error(size_error)
+            st.stop()
         file_bytes = sample_bytes
     else:
+        upload_size = getattr(upload, "size", 0)
+        size_error = _check_size_limit(upload_size, limits)
+        if size_error:
+            _clear_cached_dataset()
+            st.error(size_error)
+            st.stop()
         upload_bytes = upload.getvalue()
         if not upload_bytes:
             st.error("Il file caricato è vuoto.")
@@ -875,30 +1021,39 @@ def main():
         and cached_meta is not None
     )
 
+    df: pd.DataFrame
+
     try:
         with st.spinner("Analisi CSV..."):
             if cache_hit:
                 df = cached_df  # type: ignore[assignment]
                 cleaning_report = cached_report  # type: ignore[assignment]
                 meta = dict(cached_meta)  # type: ignore[arg-type]
-                if not tmp_path.exists():
-                    tmp_path.write_bytes(file_bytes)
+                limit_error = _check_dataframe_limits(df, limits)
+                if limit_error:
+                    _clear_cached_dataset()
+                    st.error(limit_error)
+                    st.stop()
             else:
-                tmp_path.write_bytes(file_bytes)
-                meta = analyze_csv(str(tmp_path))
-                df, cleaning_report = load_csv(
-                    str(tmp_path),
-                    encoding=meta.get("encoding"),
-                    delimiter=meta.get("delimiter"),
-                    header=meta.get("header"),
+                timeout_s = max(limits["parse_timeout_s"], 1.0)
+                df, cleaning_report, meta = _parse_csv_with_timeout(
+                    file_bytes=file_bytes,
                     apply_cleaning=apply_cleaning,
-                    return_details=True,
+                    timeout_s=timeout_s,
                 )
+                limit_error = _check_dataframe_limits(df, limits)
+                if limit_error:
+                    _clear_cached_dataset()
+                    st.error(limit_error)
+                    st.stop()
                 st.session_state["_cached_df"] = df
                 st.session_state["_cached_cleaning_report"] = cleaning_report
                 st.session_state["_cached_meta"] = dict(meta)
                 st.session_state["_cached_file_sig"] = file_sig
                 st.session_state["_cached_apply_cleaning"] = apply_cleaning
+    except TimeoutError as exc:
+        st.error(str(exc))
+        return
     except pd.errors.EmptyDataError:
         st.error(
             "Il file sembra vuoto (nessuna colonna rilevata). Verifica l'esportazione e riprova."
@@ -949,7 +1104,7 @@ def main():
     except Exception as e:
         st.warning(f"Impossibile eseguire controlli qualità: {e}")
 
-    with st.expander("📋 Dettagli dati", expanded=False): 
+    with st.expander("Dettagli dati", expanded=False):
         suggestion = cleaning_report.suggestion
         info_cols = st.columns(4)
         encoding_value = meta.get('encoding') or 'utf-8'
@@ -970,7 +1125,7 @@ def main():
             unsafe_allow_html=True,
         )
         st.caption(
-            f"Correzione automatica: {'attiva' if apply_cleaning else 'disattivata'} · "
+            f"Correzione automatica: {'attiva' if apply_cleaning else 'disattivata'} - "
             f"Confidenza formato: {suggestion.confidence:.0%} (campione={suggestion.sample_size})"
         )
 
@@ -992,17 +1147,13 @@ def main():
                 f"(prime: {cleaning_report.rows_all_nan_after_clean[:5]})"
             )
 
-        raw_name = getattr(current_file, "name", tmp_path.name)
-        try:
-            raw_bytes = tmp_path.read_bytes()
-            st.download_button(
-                "Scarica CSV originale",
-                data=raw_bytes,
-                file_name=raw_name,
-                mime="text/csv",
-            )
-        except Exception:
-            st.caption("Impossibile preparare il download del CSV originale.")
+        raw_name = getattr(current_file, "name", "dataset.csv")
+        st.download_button(
+            "Scarica CSV originale",
+            data=file_bytes,
+            file_name=raw_name,
+            mime="text/csv",
+        )
 
     n_preview = st.slider("Righe di anteprima", 5, 50, 10)
     _dataframe(df.head(n_preview))

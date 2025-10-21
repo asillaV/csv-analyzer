@@ -2,7 +2,7 @@
   "version": "1.0",
   "name": "Butterworth LP 50Hz",
   "description": "Filtro passa-basso Butterworth a 50Hz, ordine 4",
-  "created_at": "2025-10-15T19:15:08.049148",
+  "created_at": "2025-10-21T10:00:52.874286",
   "manual_fs": null,
   "filter": {
     "kind": "butter_lp",
