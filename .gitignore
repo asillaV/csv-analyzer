@@ -70,3 +70,4 @@ tests_csv/
 
 # ===== Claude =====
 .claude/
+CODE_REVIEW_REPORT.md
