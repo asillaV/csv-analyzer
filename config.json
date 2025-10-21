@@ -4,5 +4,9 @@
     "spike_z": 4.0,
     "min_points": 20,
     "max_examples": 5
+  },
+  "performance": {
+    "optimize_dtypes": true,
+    "aggressive_dtype_optimization": false
   }
 }

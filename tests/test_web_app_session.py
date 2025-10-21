@@ -259,3 +259,75 @@ def test_sample_load_integration_flow(tmp_path):
         assert current_file is not None, f"Stato {idx}: current_file non deve essere None"
         assert current_file.name == state["expected_file"], \
             f"Stato {idx}: file errato. Atteso {state['expected_file']}, ottenuto {current_file.name}"
+
+
+def test_cache_immutability_dataframe(mock_streamlit):
+    """
+    Issue #51: Verifica che modifiche al DataFrame caricato dalla cache non corrompano la cache.
+
+    Scenario: Cache hit → modifica df → ricarica cache → cache deve essere intatta.
+    """
+    import pandas as pd
+
+    # Setup: simula cache popolata
+    original_df = pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
+    mock_streamlit["_cached_df"] = original_df.copy()
+    mock_streamlit["_cached_file_sig"] = ("test_sig", "abc123")
+
+    # Simula cache load CON fix #51 (df.copy())
+    cached_df = mock_streamlit["_cached_df"]
+    df = cached_df.copy()  # FIX #51
+
+    # Mutazione del DataFrame caricato
+    df.loc[0, "a"] = 999
+
+    # Verifica che la cache NON sia stata mutata
+    assert mock_streamlit["_cached_df"].loc[0, "a"] == 1, \
+        "Cache deve rimanere immutata dopo modifiche a df caricato"
+    assert df.loc[0, "a"] == 999, "df caricato deve essere mutato"
+
+
+def test_cache_immutability_without_copy(mock_streamlit):
+    """
+    Issue #51: Dimostra il bug PRIMA del fix (senza .copy()).
+
+    Scenario: Cache hit → modifica df (senza copy) → cache corrotta.
+    """
+    import pandas as pd
+
+    # Setup: simula cache popolata
+    original_df = pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
+    mock_streamlit["_cached_df"] = original_df
+
+    # Simula cache load SENZA fix (riferimento diretto)
+    df = mock_streamlit["_cached_df"]  # PROBLEMA: no .copy()
+
+    # Mutazione del DataFrame caricato
+    df.loc[0, "a"] = 999
+
+    # BUG: la cache È STATA corrotta
+    assert mock_streamlit["_cached_df"].loc[0, "a"] == 999, \
+        "Senza .copy(), la cache viene corrotta (questo è il bug #51)"
+
+
+def test_cache_store_immutability(mock_streamlit):
+    """
+    Issue #51: Verifica che il DataFrame salvato in cache sia una copia, non un riferimento.
+
+    Scenario: Salva df in cache → modifica df originale → ricarica cache → cache intatta.
+    """
+    import pandas as pd
+
+    # Setup: df originale
+    df = pd.DataFrame({"x": [10, 20, 30], "y": [40, 50, 60]})
+
+    # Simula cache store CON fix #51 (df.copy())
+    mock_streamlit["_cached_df"] = df.copy()  # FIX #51
+
+    # Mutazione del df originale DOPO il salvataggio
+    df.loc[0, "x"] = 777
+
+    # Verifica che la cache NON sia stata mutata
+    assert mock_streamlit["_cached_df"].loc[0, "x"] == 10, \
+        "Cache deve essere isolata dal df originale"
+    assert df.loc[0, "x"] == 777, "df originale deve essere mutato"

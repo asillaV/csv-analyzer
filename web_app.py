@@ -12,7 +12,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from core.analyzer import analyze_csv
-from core.loader import load_csv
+from core.loader import load_csv, optimize_dtypes
 from core.csv_cleaner import CleaningReport
 from core.report_manager import ReportManager
 from core.visual_report_manager import VisualPlotSpec, VisualReportManager
@@ -420,6 +420,24 @@ def _load_quality_config() -> Dict[str, Any]:
     return defaults
 
 
+def _load_performance_config() -> Dict[str, Any]:
+    """Load performance configuration from config.json with safe defaults."""
+    import json
+    defaults = {
+        "optimize_dtypes": True,
+        "aggressive_dtype_optimization": False
+    }
+    try:
+        config_path = Path("config.json")
+        if config_path.exists():
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+                return config.get("performance", defaults)
+    except Exception:
+        pass
+    return defaults
+
+
 def _render_quality_badge_and_details(report: DataQualityReport) -> None:
     """Render quality badge and collapsible details panel."""
     # Badge styling
@@ -456,9 +474,24 @@ def _render_quality_badge_and_details(report: DataQualityReport) -> None:
             # Configuration info
             st.markdown("**Configurazione controlli:**")
             config_cols = st.columns(3)
-            config_cols[0].metric("Gap factor (k)", f"{report.config['gap_factor_k']:.1f}")
-            config_cols[1].metric("Soglia Z-score", f"{report.config['spike_z']:.1f}")
-            config_cols[2].metric("Min punti", report.config['min_points'])
+            with config_cols[0]:
+                st.metric(
+                    "Gap factor (k)",
+                    f"{report.config['gap_factor_k']:.1f}",
+                    help="Moltiplicatore per rilevare gap nel campionamento. Un gap viene segnalato quando la distanza tra due punti supera k volte la distanza mediana. Valori più alti = meno segnalazioni."
+                )
+            with config_cols[1]:
+                st.metric(
+                    "Soglia Z-score",
+                    f"{report.config['spike_z']:.1f}",
+                    help="Sensibilità per rilevare outlier (spike) nei dati. Valori che superano questa soglia rispetto alla mediana vengono segnalati. Valori più bassi = più sensibile."
+                )
+            with config_cols[2]:
+                st.metric(
+                    "Min punti",
+                    report.config['min_points'],
+                    help="Numero minimo di punti necessari per eseguire i controlli statistici. Dataset con meno punti non vengono analizzati."
+                )
 
             st.markdown("---")
 
@@ -845,8 +878,11 @@ def main():
     try:
         with st.spinner("Analisi CSV..."):
             if cache_hit:
-                df = cached_df  # type: ignore[assignment]
-                cleaning_report = cached_report  # type: ignore[assignment]
+                # FIX ISSUE #51: Proteggi cache da mutazioni con .copy()
+                df = cached_df.copy()  # type: ignore[assignment,union-attr]
+                # CleaningReport è immutabile (dataclass con campi readonly), shallow copy sufficiente
+                from dataclasses import replace as dataclass_replace
+                cleaning_report = dataclass_replace(cached_report)  # type: ignore[assignment,arg-type]
                 meta = dict(cached_meta)  # type: ignore[arg-type]
                 if not tmp_path.exists():
                     tmp_path.write_bytes(file_bytes)
@@ -861,7 +897,22 @@ def main():
                     apply_cleaning=apply_cleaning,
                     return_details=True,
                 )
-                st.session_state["_cached_df"] = df
+
+                # FIX ISSUE #53: Ottimizza dtype per ridurre memoria (~50% saving)
+                perf_config = _load_performance_config()
+                if perf_config.get("optimize_dtypes", True):
+                    df_optimized, dtype_conversions = optimize_dtypes(
+                        df,
+                        enabled=True,
+                        aggressive=perf_config.get("aggressive_dtype_optimization", False)
+                    )
+                    df = df_optimized
+                    if dtype_conversions:
+                        meta["dtype_optimizations"] = dtype_conversions
+
+                # FIX ISSUE #51: Salva copie in cache per evitare condivisione riferimenti
+                st.session_state["_cached_df"] = df.copy()
+                # CleaningReport è immutabile (dataclass), salviamo direttamente
                 st.session_state["_cached_cleaning_report"] = cleaning_report
                 st.session_state["_cached_meta"] = dict(meta)
                 st.session_state["_cached_file_sig"] = file_sig
