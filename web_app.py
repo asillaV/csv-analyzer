@@ -2107,7 +2107,7 @@ def main():
                     "Report generation failed",
                     exc_info=True,
                     extra={
-                        "formats": report_formats,
+                        "formats": fmt,
                         "columns": len(df.columns),
                         "rows": len(df),
                         "session_id": st.session_state.get("_dataset_id", "")[:8]
