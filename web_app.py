@@ -217,6 +217,14 @@ SAMPLE_CSV_PATH = Path("assets/sample_timeseries.csv")
 MAX_FILTER_CACHE_SIZE = 32
 MAX_FFT_CACHE_SIZE = 16
 
+# FIX ISSUE #55: Cache telemetry per monitoraggio hit/miss rate
+CACHE_STATS = {
+    "filter_hits": 0,
+    "filter_misses": 0,
+    "fft_hits": 0,
+    "fft_misses": 0,
+}
+
 
 # ---------------------- Session helpers (Issue #49) ---------------------- #
 def _ensure_session_id() -> str:
@@ -263,8 +271,14 @@ def _get_fft_cache_key(
 
 
 def _get_cached_filter(key: Tuple) -> Optional[pd.Series]:
-    """Retrieve cached filter result."""
-    return st.session_state.get("_filter_cache", {}).get(key)
+    """Retrieve cached filter result with telemetry."""
+    result = st.session_state.get("_filter_cache", {}).get(key)
+    # FIX ISSUE #55: Track cache hit/miss
+    if result is not None:
+        CACHE_STATS["filter_hits"] += 1
+    else:
+        CACHE_STATS["filter_misses"] += 1
+    return result
 
 
 def _cache_filter_result(key: Tuple, result: pd.Series) -> None:
@@ -278,8 +292,14 @@ def _cache_filter_result(key: Tuple, result: pd.Series) -> None:
 
 
 def _get_cached_fft(key: Tuple) -> Optional[Tuple[np.ndarray, np.ndarray]]:
-    """Retrieve cached FFT result."""
-    return st.session_state.get("_fft_cache", {}).get(key)
+    """Retrieve cached FFT result with telemetry."""
+    result = st.session_state.get("_fft_cache", {}).get(key)
+    # FIX ISSUE #55: Track cache hit/miss
+    if result is not None:
+        CACHE_STATS["fft_hits"] += 1
+    else:
+        CACHE_STATS["fft_misses"] += 1
+    return result
 
 
 def _cache_fft_result(key: Tuple, freqs: np.ndarray, amp: np.ndarray) -> None:
@@ -940,12 +960,15 @@ def main():
     _ensure_session_id()
     st.set_page_config(page_title="Analizzatore CSV - Web", layout="wide")
 
+    # FIX ISSUE #54: Inizializza logger per web_app
+    logger = LogManager(component="web_app").get_logger()
+
     # Inizializza preset di default all'avvio
     try:
         create_default_presets()
     except Exception as e:
-        logger = LogManager(component="preset").get_logger()
-        logger.warning(f"Impossibile creare preset default: {e}")
+        # Usa logger diretto senza variabile per evitare UnboundLocalError
+        LogManager(component="preset").get_logger().warning(f"Impossibile creare preset default: {e}")
 
     render_header()
 
@@ -1168,7 +1191,17 @@ def main():
         st.error(str(ve))
         return
     except Exception as exc:
-        st.error(f"Errore nel parsing del CSV: {exc}")
+        # FIX ISSUE #54: Messaggio generico utente, log tecnico con traceback
+        st.error("Errore nel parsing del CSV. Verifica il formato del file.")
+        logger.error(
+            "CSV parsing failed",
+            exc_info=True,
+            extra={
+                "file_size": len(file_bytes),
+                "apply_cleaning": apply_cleaning,
+                "session_id": st.session_state.get("_dataset_id", "")[:8]
+            }
+        )
         return
 
     if cleaning_report is None:
@@ -1199,10 +1232,9 @@ def main():
             min_points=quality_config['min_points'],
             max_examples=quality_config['max_examples']
         )
-        # Log summary
-        from core.logger import LogManager
-        logger = LogManager(component="quality").get_logger()
-        logger.info(quality_report.get_summary())
+        # Log summary (usa import globale, non locale)
+        quality_logger = LogManager(component="quality").get_logger()
+        quality_logger.info(quality_report.get_summary())
 
         # Render badge and details
         _render_quality_badge_and_details(quality_report)
@@ -2006,6 +2038,25 @@ def main():
         if summaries:
             st.caption("Prestazioni attive (LTTB): " + " · ".join(summaries))
 
+    # FIX ISSUE #55: Log cache hit rate dopo plot
+    filter_total = CACHE_STATS["filter_hits"] + CACHE_STATS["filter_misses"]
+    fft_total = CACHE_STATS["fft_hits"] + CACHE_STATS["fft_misses"]
+    if filter_total > 0 or fft_total > 0:
+        filter_hit_rate = (CACHE_STATS["filter_hits"] / filter_total * 100) if filter_total > 0 else 0
+        fft_hit_rate = (CACHE_STATS["fft_hits"] / fft_total * 100) if fft_total > 0 else 0
+        logger.info(
+            "Cache hit rate",
+            extra={
+                "filter_hits": CACHE_STATS["filter_hits"],
+                "filter_misses": CACHE_STATS["filter_misses"],
+                "filter_hit_rate": f"{filter_hit_rate:.1f}%",
+                "fft_hits": CACHE_STATS["fft_hits"],
+                "fft_misses": CACHE_STATS["fft_misses"],
+                "fft_hit_rate": f"{fft_hit_rate:.1f}%",
+                "session_id": st.session_state.get("_dataset_id", "")[:8]
+            }
+        )
+
     # ---- Report ----
     st.divider()
     st.subheader("Report statistici")
@@ -2049,8 +2100,19 @@ def main():
                 }
                 st.session_state.pop("_generated_report_error", None)
             except Exception as e:
+                # FIX ISSUE #54: Messaggio generico utente, log tecnico con traceback
                 st.session_state.pop("_generated_report", None)
-                st.session_state["_generated_report_error"] = str(e)
+                st.session_state["_generated_report_error"] = "Errore nella generazione del report."
+                logger.error(
+                    "Report generation failed",
+                    exc_info=True,
+                    extra={
+                        "formats": report_formats,
+                        "columns": len(df.columns),
+                        "rows": len(df),
+                        "session_id": st.session_state.get("_dataset_id", "")[:8]
+                    }
+                )
 
     report_error = st.session_state.get("_generated_report_error")
     if report_error:
@@ -2157,8 +2219,19 @@ def main():
                 st.session_state["_generated_visual_report"] = result
                 st.session_state.pop("_generated_visual_report_error", None)
             except Exception as e:
+                # FIX ISSUE #54: Messaggio generico utente, log tecnico con traceback
                 st.session_state.pop("_generated_visual_report", None)
-                st.session_state["_generated_visual_report_error"] = str(e)
+                st.session_state["_generated_visual_report_error"] = "Errore nella generazione del report visivo."
+                logger.error(
+                    "Visual report generation failed",
+                    exc_info=True,
+                    extra={
+                        "format": visual_format,
+                        "num_series": len(visual_specs),
+                        "columns": [spec["column"] for spec in visual_specs],
+                        "session_id": st.session_state.get("_dataset_id", "")[:8]
+                    }
+                )
 
     visual_error = st.session_state.get("_generated_visual_report_error")
     if visual_error:
