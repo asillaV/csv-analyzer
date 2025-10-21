@@ -179,6 +179,14 @@ def _apply_filter_cached(
     cache_key = _get_filter_cache_key(column_name, file_sig, fspec, fs_value, fs_source)
     cached = _get_cached_filter(cache_key)
     if cached is not None:
+        if cached.index.equals(series.index):
+            return cached
+        # Indici cambiati (es. decimazione performance): invalida e ricalcola
+        cache_store = st.session_state.get("_filter_cache")
+        if isinstance(cache_store, dict):
+            cache_store.pop(cache_key, None)
+        cached = None
+    if cached is not None:
         return cached
     # Cache miss: compute filter
     try:
@@ -1518,6 +1526,17 @@ def main():
     x_parsed_plot = _parse_x_column_once(df_plot, x_name)  # Per plot mode (con decimazione)
     x_parsed_orig = _parse_x_column_once(df, x_name)       # Per FFT (dati originali)
 
+    def _get_series_sources(
+        y_col: str,
+    ) -> tuple[pd.Series, Optional[pd.Series], pd.Series, Optional[pd.Series]]:
+        """Ritorna serie (plot) e serie originale per la colonna richiesta."""
+        series_plot, x_plot = _make_time_series(df_plot, x_name, y_col, x_parsed=x_parsed_plot)
+        if df_downsampled:
+            series_full, x_full = _make_time_series(df, x_name, y_col, x_parsed=x_parsed_orig)
+        else:
+            series_full, x_full = series_plot, x_plot
+        return series_plot, x_plot, series_full, x_full
+
     def _legend_label(base: str, meta: Optional[DownsampleResult]) -> str:
         if meta is None or meta.original_count <= meta.sampled_count:
             return base
@@ -1564,27 +1583,29 @@ def main():
         x_label = x_name if x_name else "Index"
 
         for yname in y_cols:
-            # FIX ISSUE #50: Usa DataFrame pre-decimato
-            # FIX ISSUE #52: Passa X pre-parsato per evitare conversioni ripetute
-            series, x_ser = _make_time_series(df_plot, x_name, yname, x_parsed=x_parsed_plot)
+            series_plot, x_plot, series_full, x_full = _get_series_sources(yname)
+            series = series_plot
+            x_ser = x_plot
             if series.dropna().empty:
                 st.info(f"'{yname}': nessun dato numerico valido.")
                 continue
 
             # Filtro (se attivo)
-            y_filt = None
+            y_filt_full: Optional[pd.Series] = None
+            y_filt_plot: Optional[pd.Series] = None
             ok, msg = validate_filter_spec(fspec, fs_value)
             if fspec.enabled and not ok:
                 st.warning(f"Filtro non applicato a {yname}: {msg}")
                 y_plot = series
             else:
                 if fspec.enabled:
-                    y_filt = _apply_filter_cached(series, x_ser, fspec, fs_value, fs_info.source, file_sig, yname)
-                    if y_filt is None:
+                    y_filt_full = _apply_filter_cached(series_full, x_full, fspec, fs_value, fs_info.source, file_sig, yname)
+                    if y_filt_full is None:
                         st.warning(f"Filtro non applicato a {yname}: errore nel calcolo.")
                         y_plot = series
                     else:
-                        y_plot = y_filt
+                        y_filt_plot = y_filt_full.reindex(series.index)
+                        y_plot = y_filt_plot
                 else:
                     y_plot = series
 
@@ -1592,13 +1613,14 @@ def main():
             x_main, y_main, main_meta = _prepare_plot_series(name_main, y_plot, x_ser)
 
             # Originale tratteggiato se richiesto
-            if overlay_orig and fspec.enabled and y_filt is not None:
+            if overlay_orig and fspec.enabled and y_filt_plot is not None:
                 overlay_label = f"{yname} (originale)"
                 reuse_idx = y_main.index if main_meta and main_meta.original_count > main_meta.sampled_count else None
+                x_overlay_src = x_full if x_full is not None else x_ser
                 x_overlay, y_overlay, overlay_meta = _prepare_plot_series(
                     overlay_label,
-                    series,
-                    x_ser,
+                    series_full,
+                    x_overlay_src,
                     reuse_index=reuse_idx,
                 )
                 combined.add_trace(
@@ -1620,7 +1642,7 @@ def main():
                     name=_legend_label(name_main, main_meta),
                 )
             )
-            if overlay_orig and fspec.enabled and y_filt is not None:
+            if overlay_orig and fspec.enabled and y_filt_plot is not None:
                 combined.data = combined.data[::-1]
 
         combined.update_layout(
@@ -1656,7 +1678,7 @@ def main():
                     detail = "; ".join(fs_info.warnings) if fs_info.warnings else "campionamento irregolare."
                     st.warning(f"FFT non calcolata per {yname}: {detail}")
                 else:
-                    is_filt = fspec.enabled and y_filt is not None and fft_use == "Filtrato (se attivo)"
+                    is_filt = fspec.enabled and y_filt_full is not None and fft_use == "Filtrato (se attivo)"
                     freqs, amp = _compute_fft_cached(y_fft, fs_value, fs_info.source, fftspec, file_sig, yname, is_filt)
                     if freqs.size == 0:
                         st.info(f"FFT non calcolabile per {yname} (serie troppo corta o parametri non validi).")
@@ -1670,9 +1692,9 @@ def main():
         # ----- UNA TAB PER SERIE ----- #
         tabs = st.tabs(y_cols)
         for idx, yname in enumerate(y_cols):
-            # FIX ISSUE #50: Usa DataFrame pre-decimato
-            # FIX ISSUE #52: Passa X pre-parsato per evitare conversioni ripetute
-            series, x_ser = _make_time_series(df_plot, x_name, yname, x_parsed=x_parsed_plot)
+            series_plot, x_plot, series_full, x_full = _get_series_sources(yname)
+            series = series_plot
+            x_ser = x_plot
             host = tabs[idx]
 
             if series.dropna().empty:
@@ -1680,19 +1702,21 @@ def main():
                 continue
 
             # Filtro
-            y_filt = None
+            y_filt_full: Optional[pd.Series] = None
+            y_filt_plot: Optional[pd.Series] = None
             ok, msg = validate_filter_spec(fspec, fs_value)
             if fspec.enabled and not ok:
                 host.warning(f"Filtro non applicato a {yname}: {msg}")
                 y_plot = series
             else:
                 if fspec.enabled:
-                    y_filt = _apply_filter_cached(series, x_ser, fspec, fs_value, fs_info.source, file_sig, yname)
-                    if y_filt is None:
+                    y_filt_full = _apply_filter_cached(series_full, x_full, fspec, fs_value, fs_info.source, file_sig, yname)
+                    if y_filt_full is None:
                         host.warning(f"Filtro non applicato a {yname}: errore nel calcolo.")
                         y_plot = series
                     else:
-                        y_plot = y_filt
+                        y_filt_plot = y_filt_full.reindex(series.index)
+                        y_plot = y_filt_plot
                 else:
                     y_plot = series
 
@@ -1705,13 +1729,14 @@ def main():
                 fig.update_yaxes(range=yrange)
             if xrange:
                 fig.update_xaxes(range=xrange)
-            if overlay_orig and fspec.enabled and y_filt is not None:
+            if overlay_orig and fspec.enabled and y_filt_plot is not None:
                 overlay_label = f"{yname} (originale)"
                 reuse_idx = y_plot_ds.index if main_meta and main_meta.original_count > main_meta.sampled_count else None
+                x_overlay_src = x_full if x_full is not None else x_ser
                 x_overlay, y_overlay, overlay_meta = _prepare_plot_series(
                     overlay_label,
-                    series,
-                    x_ser,
+                    series_full,
+                    x_overlay_src,
                     reuse_index=reuse_idx,
                 )
                 fig.add_trace(
@@ -1728,14 +1753,17 @@ def main():
 
             # FFT per singola serie
             if fftspec.enabled:
-                y_fft = y_filt if (fspec.enabled and y_filt is not None and fft_use == "Filtrato (se attivo)") else series
+                if fspec.enabled and y_filt_full is not None and fft_use == "Filtrato (se attivo)":
+                    y_fft = y_filt_full
+                else:
+                    y_fft = series_full
                 if not fs_value or fs_value <= 0:
                     host.warning(f"FFT non calcolata per {yname}: fs non disponibile.")
                 elif not fs_info.is_uniform:
                     detail = "; ".join(fs_info.warnings) if fs_info.warnings else "campionamento irregolare."
                     host.warning(f"FFT non calcolata per {yname}: {detail}")
                 else:
-                    is_filt = fspec.enabled and y_filt is not None and fft_use == "Filtrato (se attivo)"
+                    is_filt = fspec.enabled and y_filt_full is not None and fft_use == "Filtrato (se attivo)"
                     freqs, amp = _compute_fft_cached(y_fft, fs_value, fs_info.source, fftspec, file_sig, yname, is_filt)
                     if freqs.size == 0:
                         host.info(f"FFT non calcolabile per {yname} (serie troppo corta o parametri non validi).")
@@ -1748,28 +1776,30 @@ def main():
     else:
         # ----- CASCATA: grafici uno sotto l'altro ----- #
         for yname in y_cols:
-            # FIX ISSUE #50: Usa DataFrame pre-decimato
-            # FIX ISSUE #52: Passa X pre-parsato per evitare conversioni ripetute
-            series, x_ser = _make_time_series(df_plot, x_name, yname, x_parsed=x_parsed_plot)
+            series_plot, x_plot, series_full, x_full = _get_series_sources(yname)
+            series = series_plot
+            x_ser = x_plot
 
             if series.dropna().empty:
                 st.info(f"'{yname}': nessun dato numerico valido.")
                 continue
 
             # Filtro
-            y_filt = None
+            y_filt_full: Optional[pd.Series] = None
+            y_filt_plot: Optional[pd.Series] = None
             ok, msg = validate_filter_spec(fspec, fs_value)
             if fspec.enabled and not ok:
                 st.warning(f"Filtro non applicato a {yname}: {msg}")
                 y_plot = series
             else:
                 if fspec.enabled:
-                    y_filt = _apply_filter_cached(series, x_ser, fspec, fs_value, fs_info.source, file_sig, yname)
-                    if y_filt is None:
+                    y_filt_full = _apply_filter_cached(series_full, x_full, fspec, fs_value, fs_info.source, file_sig, yname)
+                    if y_filt_full is None:
                         st.warning(f"Filtro non applicato a {yname}: errore nel calcolo.")
                         y_plot = series
                     else:
-                        y_plot = y_filt
+                        y_filt_plot = y_filt_full.reindex(series.index)
+                        y_plot = y_filt_plot
                 else:
                     y_plot = series
 
@@ -1782,13 +1812,14 @@ def main():
                 fig.update_yaxes(range=yrange)
             if xrange:
                 fig.update_xaxes(range=xrange)
-            if overlay_orig and fspec.enabled and y_filt is not None:
+            if overlay_orig and fspec.enabled and y_filt_plot is not None:
                 overlay_label = f"{yname} (originale)"
                 reuse_idx = y_plot_ds.index if main_meta and main_meta.original_count > main_meta.sampled_count else None
+                x_overlay_src = x_full if x_full is not None else x_ser
                 x_overlay, y_overlay, overlay_meta = _prepare_plot_series(
                     overlay_label,
-                    series,
-                    x_ser,
+                    series_full,
+                    x_overlay_src,
                     reuse_index=reuse_idx,
                 )
                 fig.add_trace(
@@ -1805,14 +1836,17 @@ def main():
 
             # FFT sotto ogni grafico (se attiva)
             if fftspec.enabled:
-                y_fft = y_filt if (fspec.enabled and y_filt is not None and fft_use == "Filtrato (se attivo)") else series
+                if fspec.enabled and y_filt_full is not None and fft_use == "Filtrato (se attivo)":
+                    y_fft = y_filt_full
+                else:
+                    y_fft = series_full
                 if not fs_value or fs_value <= 0:
                     st.warning(f"FFT non calcolata per {yname}: fs non disponibile.")
                 elif not fs_info.is_uniform:
                     detail = "; ".join(fs_info.warnings) if fs_info.warnings else "campionamento irregolare."
                     st.warning(f"FFT non calcolata per {yname}: {detail}")
                 else:
-                    is_filt = fspec.enabled and y_filt is not None and fft_use == "Filtrato (se attivo)"
+                    is_filt = fspec.enabled and y_filt_full is not None and fft_use == "Filtrato (se attivo)"
                     freqs, amp = _compute_fft_cached(y_fft, fs_value, fs_info.source, fftspec, file_sig, yname, is_filt)
                     if freqs.size == 0:
                         st.info(f"FFT non calcolabile per {yname} (serie troppo corta o parametri non validi).")
