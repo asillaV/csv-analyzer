@@ -8,5 +8,11 @@
   "performance": {
     "optimize_dtypes": true,
     "aggressive_dtype_optimization": false
+  },
+  "limits": {
+    "max_file_mb": 100,
+    "max_rows": 1000000,
+    "max_cols": 500,
+    "parse_timeout_s": 30
   }
 }
