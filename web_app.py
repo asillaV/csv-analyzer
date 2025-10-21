@@ -1422,6 +1422,36 @@ def main():
     downsample_events: List[tuple[str, DownsampleResult]] = []
     recorded_results: set[int] = set()
 
+    # FIX ISSUE #50: Pre-decima DataFrame UNA volta prima del loop
+    df_plot = df
+    df_downsampled = False
+    downsampled_metadata: Optional[DownsampleResult] = None
+
+    if performance_enabled and total_rows > PERFORMANCE_MAX_POINTS:
+        # Usa prima colonna Y o X per determinare gli indici di decimazione
+        representative_col = y_cols[0] if y_cols else None
+        if representative_col:
+            y_repr = pd.to_numeric(df[representative_col], errors="coerce")
+            x_repr = x_values if x_values is not None else None
+
+            # Calcola indici di downsampling
+            ds_result = downsample_series(
+                y_repr,
+                x_repr,
+                max_points=PERFORMANCE_MAX_POINTS,
+                method=PERFORMANCE_METHOD,
+            )
+
+            # Pre-decima DF intero usando gli indici
+            if ds_result.sampled_count < total_rows:
+                df_plot = df.iloc[ds_result.indices].copy()
+                df_downsampled = True
+                downsampled_metadata = ds_result
+                st.caption(
+                    f"⚡ Pre-decimazione: {total_rows:,} → {len(df_plot):,} righe "
+                    f"({ds_result.reduction_ratio:.1f}×, {ds_result.method.upper()})"
+                )
+
     def _legend_label(base: str, meta: Optional[DownsampleResult]) -> str:
         if meta is None or meta.original_count <= meta.sampled_count:
             return base
@@ -1438,6 +1468,12 @@ def main():
             y_sel = y_data.loc[reuse_index]
             x_sel = x_data.loc[reuse_index] if x_data is not None else None
             return x_sel, y_sel, None
+
+        # FIX ISSUE #50: Se DF già pre-decimato, salta downsampling per-series
+        if df_downsampled:
+            return x_data, y_data, downsampled_metadata
+
+        # Fallback: downsampling per-series (legacy, solo se DF NON pre-decimato)
         if not performance_enabled or len(y_data) <= PERFORMANCE_MAX_POINTS:
             return x_data, y_data, None
         cache_key = (id(y_data), id(x_data) if x_data is not None else None)
@@ -1462,7 +1498,8 @@ def main():
         x_label = x_name if x_name else "Index"
 
         for yname in y_cols:
-            series, x_ser = _make_time_series(df, x_name, yname)
+            # FIX ISSUE #50: Usa DataFrame pre-decimato
+            series, x_ser = _make_time_series(df_plot, x_name, yname)
             if series.dropna().empty:
                 st.info(f"'{yname}': nessun dato numerico valido.")
                 continue
@@ -1537,6 +1574,7 @@ def main():
         # FFT: una per serie, sotto
         if fftspec.enabled:
             for yname in y_cols:
+                # FIX ISSUE #50: FFT usa dati ORIGINALI (non decimati), non df_plot
                 series, x_ser = _make_time_series(df, x_name, yname)
                 if series.dropna().empty:
                     continue
@@ -1564,7 +1602,8 @@ def main():
         # ----- UNA TAB PER SERIE ----- #
         tabs = st.tabs(y_cols)
         for idx, yname in enumerate(y_cols):
-            series, x_ser = _make_time_series(df, x_name, yname)
+            # FIX ISSUE #50: Usa DataFrame pre-decimato
+            series, x_ser = _make_time_series(df_plot, x_name, yname)
             host = tabs[idx]
 
             if series.dropna().empty:
@@ -1638,9 +1677,10 @@ def main():
                         )
 
     else:
-        # ----- CASCATA: grafici uno sotto l’altro ----- #
+        # ----- CASCATA: grafici uno sotto l'altro ----- #
         for yname in y_cols:
-            series, x_ser = _make_time_series(df, x_name, yname)
+            # FIX ISSUE #50: Usa DataFrame pre-decimato
+            series, x_ser = _make_time_series(df_plot, x_name, yname)
 
             if series.dropna().empty:
                 st.info(f"'{yname}': nessun dato numerico valido.")

@@ -36,7 +36,7 @@ class TestEstimateFs:
 
     def test_uniform_datetime_series(self):
         """Serie datetime uniforme."""
-        x = pd.date_range('2025-01-01', periods=10, freq='1S')
+        x = pd.date_range('2025-01-01', periods=10, freq='1s')
         fs = estimate_fs(pd.Series(x))
         assert fs is not None
         assert fs == pytest.approx(1.0, rel=0.01)  # 1 Hz (1 sample/sec)
@@ -100,7 +100,7 @@ class TestResolveFs:
         assert info.details.get("median_dt") == pytest.approx(0.1, rel=0.01)
 
     def test_datetime_estimation(self):
-        x = pd.Series(pd.date_range('2025-01-01', periods=5, freq='1S'))
+        x = pd.Series(pd.date_range('2025-01-01', periods=5, freq='1s'))
         info = resolve_fs(x, manual_fs=None)
         assert info.value == pytest.approx(1.0, rel=0.01)
         assert info.source == "datetime"
