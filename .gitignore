@@ -65,8 +65,6 @@ tests_csv/
 # ===== Testing & Coverage =====
 .pytest_cache/
 .coverage
-htmlcov/
-coverage.xml
 *.cover
 .hypothesis/
 

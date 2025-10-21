@@ -1,10 +1,13 @@
 ﻿from __future__ import annotations
 
+import hashlib
+import html
 import inspect
 from pathlib import Path
-import hashlib
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+import uuid
 
 import numpy as np
 import pandas as pd
@@ -36,6 +39,8 @@ from core.preset_manager import (
     PresetError,
 )
 from core.logger import LogManager
+
+FileSignature = Tuple[str, int, str]
 
 # ---------------------- Reset helpers ---------------------- #
 RESETTABLE_KEYS = {
@@ -80,6 +85,23 @@ MAX_FILTER_CACHE_SIZE = 32
 MAX_FFT_CACHE_SIZE = 16
 
 
+# ---------------------- Session helpers (Issue #49) ---------------------- #
+def _ensure_session_id() -> str:
+    """Return the per-session identifier, initializing it on first access."""
+    key = "dataset_id"
+    if key not in st.session_state:
+        st.session_state[key] = uuid.uuid4().hex
+    return st.session_state[key]
+
+
+def _build_file_signature(file_bytes: bytes) -> FileSignature:
+    """Create a file signature bound to the current session."""
+    session_id = _ensure_session_id()
+    size = len(file_bytes)
+    digest = hashlib.sha1(file_bytes).hexdigest()[:16]
+    return (session_id, size, digest)
+
+
 # ---------------------- Cache helpers (Issue #35) ---------------------- #
 def _init_result_caches() -> None:
     """Initialize cache dictionaries in session state if not present."""
@@ -90,7 +112,7 @@ def _init_result_caches() -> None:
 
 
 def _get_filter_cache_key(
-    column: str, file_sig: Tuple, fspec: FilterSpec, fs: Optional[float], fs_source: Optional[str]
+    column: str, file_sig: FileSignature, fspec: FilterSpec, fs: Optional[float], fs_source: Optional[str]
 ) -> Tuple:
     """Generate hashable cache key for filter results."""
     from dataclasses import astuple
@@ -99,7 +121,7 @@ def _get_filter_cache_key(
 
 
 def _get_fft_cache_key(
-    column: str, file_sig: Tuple, is_filtered: bool, fftspec: FFTSpec, fs: float, fs_source: Optional[str]
+    column: str, file_sig: FileSignature, is_filtered: bool, fftspec: FFTSpec, fs: float, fs_source: Optional[str]
 ) -> Tuple:
     """Generate hashable cache key for FFT results."""
     from dataclasses import astuple
@@ -149,7 +171,7 @@ def _apply_filter_cached(
     fspec: FilterSpec,
     fs_value: Optional[float],
     fs_source: Optional[str],
-    file_sig: Tuple,
+    file_sig: FileSignature,
     column_name: str,
 ) -> Optional[pd.Series]:
     """Apply filter with caching. Returns filtered series or None if filter fails."""
@@ -172,7 +194,7 @@ def _compute_fft_cached(
     fs_value: float,
     fs_source: Optional[str],
     fftspec: FFTSpec,
-    file_sig: Tuple,
+    file_sig: FileSignature,
     column_name: str,
     is_filtered: bool,
 ) -> Tuple[np.ndarray, np.ndarray]:
@@ -328,6 +350,13 @@ def _fmt_csv_token(token: Optional[str]) -> str:
     return token
 
 
+def _meta_info_html(label: str, value: Any) -> str:
+    """Format metadata entries for safe HTML rendering."""
+    safe_label = html.escape(str(label))
+    safe_value = html.escape("" if value is None else str(value))
+    return f"**{safe_label}**<br/>{safe_value}"
+
+
 def _cleaning_stats_table(report: CleaningReport) -> pd.DataFrame:
     rows = []
     for name, stats in report.columns.items():
@@ -453,15 +482,18 @@ def _render_quality_badge_and_details(report: DataQualityReport) -> None:
     # Count issues
     issue_count = len(report.issues)
     issue_summary = f" ({issue_count} problema{'i' if issue_count != 1 else ''})" if issue_count > 0 else ""
+    badge_icon_safe = html.escape(badge_icon)
+    badge_text_safe = html.escape(badge_text)
+    issue_summary_safe = html.escape(issue_summary)
 
     st.markdown(
         f"""
         <div style="display: inline-flex; align-items: center; gap: 8px;
                     padding: 8px 16px; border-radius: 8px; margin: 8px 0;
                     background-color: {badge_color}15; border-left: 4px solid {badge_color};">
-            <span style="font-size: 1.2rem;">{badge_icon}</span>
+            <span style="font-size: 1.2rem;">{badge_icon_safe}</span>
             <span style="font-weight: 600; color: {badge_color};">
-                Qualità dati: {badge_text}{issue_summary}
+                Qualità dati: {badge_text_safe}{issue_summary_safe}
             </span>
         </div>
         """,
@@ -703,7 +735,8 @@ def _sync_visual_spec_state(selection: Sequence[str], default_x_label: str) -> N
 
 
 def main():
-    st.set_page_config(page_title="Analizzatore CSV — Web", layout="wide")
+    _ensure_session_id()
+    st.set_page_config(page_title="Analizzatore CSV - Web", layout="wide")
 
     # Inizializza preset di default all'avvio
     try:
@@ -862,7 +895,7 @@ def main():
         file_bytes = upload_bytes
         upload.seek(0)
 
-    file_sig = (len(file_bytes), hashlib.sha1(file_bytes).hexdigest())
+    file_sig = _build_file_signature(file_bytes)
 
     cached_df = st.session_state.get("_cached_df")
     cached_report = st.session_state.get("_cached_cleaning_report")
@@ -970,20 +1003,21 @@ def main():
     with st.expander("📋 Dettagli dati", expanded=False): 
         suggestion = cleaning_report.suggestion
         info_cols = st.columns(4)
+        encoding_value = meta.get('encoding') or 'utf-8'
         info_cols[0].markdown(
-            f"**Encoding**<br/>{meta.get('encoding', 'utf-8')}",
+            _meta_info_html("Encoding", encoding_value),
             unsafe_allow_html=True,
         )
         info_cols[1].markdown(
-            f"**Delimiter**<br/>{_fmt_csv_token(meta.get('delimiter'))}",
+            _meta_info_html("Delimiter", _fmt_csv_token(meta.get('delimiter'))),
             unsafe_allow_html=True,
         )
         info_cols[2].markdown(
-            f"**Decimal**<br/>{_fmt_csv_token(suggestion.decimal)}",
+            _meta_info_html("Decimal", _fmt_csv_token(suggestion.decimal)),
             unsafe_allow_html=True,
         )
         info_cols[3].markdown(
-            f"**Migliaia**<br/>{_fmt_csv_token(suggestion.thousands)}",
+            _meta_info_html("Migliaia", _fmt_csv_token(suggestion.thousands)),
             unsafe_allow_html=True,
         )
         st.caption(
@@ -1215,10 +1249,10 @@ def main():
                 key="preset_selector"
             )
         with pcol2:
-            st.markdown("<br>", unsafe_allow_html=True) # per allineare al centro il bottone
+            st.write("")  # spacer per allineare il pulsante
             load_clicked = st.button("Carica", disabled=selected_preset == "---", key="load_preset_btn")
         with pcol3:
-            st.markdown("<br>", unsafe_allow_html=True) # per allineare al centro il bottone
+            st.write("")  # spacer per allineare il pulsante
             delete_clicked = st.button("Elimina", disabled=selected_preset == "---", key="delete_preset_btn")
 
         # Logica Load Preset
@@ -1250,7 +1284,7 @@ def main():
         with save_col2:
             new_preset_desc = st.text_input("Descrizione (opzionale)", placeholder="es. Butterworth LP + FFT", key="new_preset_desc_input")
         with save_col3:
-            st.markdown("<br>", unsafe_allow_html=True) # per allineare al centro il bottone
+            st.write("")  # spacer per allineare il pulsante
             save_clicked = st.button("Salva", key="save_new_preset_btn")
 
         if save_clicked:
@@ -1709,7 +1743,7 @@ def main():
             key="report_base_name",
         )
     with col_r2:
-        st.markdown("<br>", unsafe_allow_html=True) # per allineare al centro il bottone
+        st.write("")  # spacer per allineare il pulsante
         if st.button("Genera report"):
             try:
                 manager = ReportManager()
