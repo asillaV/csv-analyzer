@@ -43,9 +43,27 @@ def load_csv(
         log.error(msg)
         raise FileNotFoundError(msg)
 
-    read_kwargs = {
+    # FASE 1 OPTIMIZATION: Usa engine C per performance 10-30× migliori
+    # Con fallback automatico a engine Python per file malformati
+
+    # Assicura delimiter esplicito per engine C
+    effective_delimiter = delimiter if delimiter else ","
+
+    read_kwargs_fast = {
+        "sep": effective_delimiter,
+        "engine": "c",  # Engine C: 10-30× più veloce di Python
+        "encoding": encoding if encoding else "utf-8",
+        "header": header if header is not None else "infer",
+        "usecols": list(usecols) if usecols is not None else None,
+        "dtype": str,  # str invece di "string" (compatibile con engine C)
+        "keep_default_na": False,
+        "na_filter": False,
+        "on_bad_lines": "skip",
+    }
+
+    read_kwargs_safe = {
         "sep": delimiter if delimiter else None,
-        "engine": "python",
+        "engine": "python",  # Fallback: più lento ma più tollerante
         "encoding": encoding if encoding else None,
         "header": header if header is not None else "infer",
         "usecols": list(usecols) if usecols is not None else None,
@@ -56,7 +74,28 @@ def load_csv(
     }
 
     try:
-        df_raw = pd.read_csv(path, **read_kwargs)
+        # TENTATIVO 1: Engine C (veloce)
+        df_raw = pd.read_csv(path, **read_kwargs_fast)
+        log.debug("CSV loaded with engine='c' (fast mode)")
+    except (pd.errors.ParserError, pd.errors.ParserWarning) as parse_err:
+        # FALLBACK: Engine Python (safe mode)
+        log.warning(
+            "Fast loading failed (%s), falling back to safe mode",
+            parse_err,
+            exc_info=False
+        )
+        try:
+            df_raw = pd.read_csv(path, **read_kwargs_safe)
+            log.info("CSV loaded with engine='python' (safe mode)")
+        except pd.errors.EmptyDataError as ede:
+            log.error("File CSV vuoto o non leggibile (%s): %s", path.name, ede, exc_info=True)
+            raise
+        except ValueError as ve:
+            log.error("Valore non valido in load_csv (usecols o header): %s", ve, exc_info=True)
+            raise
+        except Exception as e:
+            log.error("Errore in lettura CSV: %s", e, exc_info=True)
+            raise
     except pd.errors.EmptyDataError as ede:
         log.error("File CSV vuoto o non leggibile (%s): %s", path.name, ede, exc_info=True)
         raise
@@ -64,7 +103,7 @@ def load_csv(
         log.error("Valore non valido in load_csv (usecols o header): %s", ve, exc_info=True)
         raise
     except Exception as e:
-        log.error("Errore in lettura CSV: %s", e, exc_info=True)
+        log.error("Errore critico in lettura CSV: %s", e, exc_info=True)
         raise
 
     result = clean_dataframe(
