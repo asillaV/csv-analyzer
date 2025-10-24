@@ -1,0 +1,19 @@
+{
+  "version": "1.0",
+  "name": "Solo FFT",
+  "description": "Analisi FFT con detrend e finestra Hann, nessun filtro",
+  "created_at": "2025-10-22T21:01:12.931620",
+  "manual_fs": null,
+  "filter": {
+    "kind": "ma",
+    "enabled": false,
+    "order": 4,
+    "cutoff": null,
+    "ma_window": 5
+  },
+  "fft": {
+    "enabled": true,
+    "detrend": true,
+    "window": "hann"
+  }
+}

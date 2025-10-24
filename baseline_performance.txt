@@ -1,0 +1,334 @@
+2025-10-22 20:54:44,996 | INFO     | analizzatore | Logger configurato. File: C:\Users\valli\Desktop\SW\analizzatore_csv\analizzatore_csv_v4\logs\analizzatore_20251022.log
+2025-10-22 20:54:50,179 | INFO     | analizzatore.analyzer | Detecting BOM for file: tests_csv\01_basic.csv
+2025-10-22 20:54:50,192 | INFO     | analizzatore.analyzer | Detected encoding=utf-8, delimiter=',', header=0
+2025-10-22 20:54:50,192 | INFO     | analizzatore.analyzer | Extracted 1 columns from header row 0.
+2025-10-22 20:54:50,210 | INFO     | analizzatore.loader | CSV caricato: 01_basic.csv (righe=50, colonne=1, col_numeric=1, cleaning=on)
+2025-10-22 20:54:50,210 | INFO     | analizzatore.analyzer | Detecting BOM for file: tests_csv\01_basic.csv
+2025-10-22 20:54:50,210 | INFO     | analizzatore.analyzer | Detected encoding=utf-8, delimiter=',', header=0
+2025-10-22 20:54:50,210 | INFO     | analizzatore.analyzer | Extracted 1 columns from header row 0.
+2025-10-22 20:54:50,215 | INFO     | analizzatore.loader | CSV caricato: 01_basic.csv (righe=50, colonne=1, col_numeric=0, cleaning=off)
+2025-10-22 20:54:50,216 | INFO     | analizzatore.analyzer | Detecting BOM for file: tests_csv\02_with_x_numeric.csv
+2025-10-22 20:54:50,228 | INFO     | analizzatore.analyzer | Detected encoding=utf-8, delimiter=',', header=0
+2025-10-22 20:54:50,228 | INFO     | analizzatore.analyzer | Extracted 2 columns from header row 0.
+2025-10-22 20:54:50,257 | INFO     | analizzatore.loader | CSV caricato: 02_with_x_numeric.csv (righe=1000, colonne=2, col_numeric=2, cleaning=on)
+2025-10-22 20:54:50,257 | INFO     | analizzatore.analyzer | Detecting BOM for file: tests_csv\02_with_x_numeric.csv
+2025-10-22 20:54:50,258 | INFO     | analizzatore.analyzer | Detected encoding=utf-8, delimiter=',', header=0
+2025-10-22 20:54:50,258 | INFO     | analizzatore.analyzer | Extracted 2 columns from header row 0.
+2025-10-22 20:54:50,288 | INFO     | analizzatore.loader | CSV caricato: 02_with_x_numeric.csv (righe=1000, colonne=2, col_numeric=0, cleaning=off)
+2025-10-22 20:54:50,289 | INFO     | analizzatore.analyzer | Detecting BOM for file: tests_csv\03_with_x_datetime.csv
+2025-10-22 20:54:50,309 | INFO     | analizzatore.analyzer | Detected encoding=utf-8, delimiter=',', header=0
+2025-10-22 20:54:50,310 | INFO     | analizzatore.analyzer | Extracted 2 columns from header row 0.
+2025-10-22 20:54:50,333 | INFO     | analizzatore.loader | CSV caricato: 03_with_x_datetime.csv (righe=200, colonne=2, col_numeric=1, cleaning=on)
+2025-10-22 20:54:50,333 | INFO     | analizzatore.analyzer | Detecting BOM for file: tests_csv\03_with_x_datetime.csv
+2025-10-22 20:54:50,334 | INFO     | analizzatore.analyzer | Detected encoding=utf-8, delimiter=',', header=0
+2025-10-22 20:54:50,334 | INFO     | analizzatore.analyzer | Extracted 2 columns from header row 0.
+2025-10-22 20:54:50,353 | INFO     | analizzatore.loader | CSV caricato: 03_with_x_datetime.csv (righe=200, colonne=2, col_numeric=0, cleaning=off)
+2025-10-22 20:54:50,354 | INFO     | analizzatore.analyzer | Detecting BOM for file: tests_csv\04_noise_signal.csv
+2025-10-22 20:54:50,376 | INFO     | analizzatore.analyzer | Detected encoding=utf-8, delimiter=',', header=0
+2025-10-22 20:54:50,376 | INFO     | analizzatore.analyzer | Extracted 2 columns from header row 0.
+2025-10-22 20:54:50,423 | INFO     | analizzatore.loader | CSV caricato: 04_noise_signal.csv (righe=2000, colonne=2, col_numeric=2, cleaning=on)
+2025-10-22 20:54:50,423 | INFO     | analizzatore.analyzer | Detecting BOM for file: tests_csv\04_noise_signal.csv
+2025-10-22 20:54:50,424 | INFO     | analizzatore.analyzer | Detected encoding=utf-8, delimiter=',', header=0
+2025-10-22 20:54:50,425 | INFO     | analizzatore.analyzer | Extracted 2 columns from header row 0.
+2025-10-22 20:54:50,460 | INFO     | analizzatore.loader | CSV caricato: 04_noise_signal.csv (righe=2000, colonne=2, col_numeric=0, cleaning=off)
+2025-10-22 20:54:50,461 | INFO     | analizzatore.analyzer | Detecting BOM for file: tests_csv\05_multicolumn.csv
+2025-10-22 20:54:50,474 | INFO     | analizzatore.analyzer | Detected encoding=utf-8, delimiter=',', header=0
+2025-10-22 20:54:50,474 | INFO     | analizzatore.analyzer | Extracted 4 columns from header row 0.
+2025-10-22 20:54:50,513 | INFO     | analizzatore.loader | CSV caricato: 05_multicolumn.csv (righe=500, colonne=4, col_numeric=4, cleaning=on)
+2025-10-22 20:54:50,513 | INFO     | analizzatore.analyzer | Detecting BOM for file: tests_csv\05_multicolumn.csv
+2025-10-22 20:54:50,514 | INFO     | analizzatore.analyzer | Detected encoding=utf-8, delimiter=',', header=0
+2025-10-22 20:54:50,514 | INFO     | analizzatore.analyzer | Extracted 4 columns from header row 0.
+2025-10-22 20:54:50,545 | INFO     | analizzatore.loader | CSV caricato: 05_multicolumn.csv (righe=500, colonne=4, col_numeric=0, cleaning=off)
+2025-10-22 20:54:50,547 | INFO     | analizzatore.analyzer | Detecting BOM for file: tests_csv\06_nan_and_inf.csv
+2025-10-22 20:54:50,562 | INFO     | analizzatore.analyzer | Detected encoding=utf-8, delimiter=',', header=0
+2025-10-22 20:54:50,562 | INFO     | analizzatore.analyzer | Extracted 1 columns from header row 0.
+2025-10-22 20:54:50,569 | INFO     | analizzatore.loader | CSV caricato: 06_nan_and_inf.csv (righe=45, colonne=1, col_numeric=1, cleaning=on)
+2025-10-22 20:54:50,569 | INFO     | analizzatore.analyzer | Detecting BOM for file: tests_csv\06_nan_and_inf.csv
+2025-10-22 20:54:50,570 | INFO     | analizzatore.analyzer | Detected encoding=utf-8, delimiter=',', header=0
+2025-10-22 20:54:50,570 | INFO     | analizzatore.analyzer | Extracted 1 columns from header row 0.
+2025-10-22 20:54:50,575 | INFO     | analizzatore.loader | CSV caricato: 06_nan_and_inf.csv (righe=45, colonne=1, col_numeric=0, cleaning=off)
+2025-10-22 20:54:50,576 | INFO     | analizzatore.analyzer | Detecting BOM for file: tests_csv\07_short_signal.csv
+2025-10-22 20:54:50,599 | INFO     | analizzatore.analyzer | Detected encoding=utf-8, delimiter=',', header=0
+2025-10-22 20:54:50,600 | INFO     | analizzatore.analyzer | Extracted 2 columns from header row 0.
+2025-10-22 20:54:50,608 | INFO     | analizzatore.loader | CSV caricato: 07_short_signal.csv (righe=3, colonne=2, col_numeric=2, cleaning=on)
+2025-10-22 20:54:50,609 | INFO     | analizzatore.analyzer | Detecting BOM for file: tests_csv\07_short_signal.csv
+2025-10-22 20:54:50,609 | INFO     | analizzatore.analyzer | Detected encoding=utf-8, delimiter=',', header=0
+2025-10-22 20:54:50,609 | INFO     | analizzatore.analyzer | Extracted 2 columns from header row 0.
+2025-10-22 20:54:50,615 | INFO     | analizzatore.loader | CSV caricato: 07_short_signal.csv (righe=3, colonne=2, col_numeric=0, cleaning=off)
+2025-10-22 20:54:50,616 | INFO     | analizzatore.analyzer | Detecting BOM for file: tests_csv\08_big_signal.csv
+2025-10-22 20:54:50,633 | INFO     | analizzatore.analyzer | Detected encoding=utf-8, delimiter=',', header=0
+2025-10-22 20:54:50,633 | INFO     | analizzatore.analyzer | Extracted 2 columns from header row 0.
+2025-10-22 20:54:52,290 | INFO     | analizzatore.loader | CSV caricato: 08_big_signal.csv (righe=200000, colonne=2, col_numeric=2, cleaning=on)
+2025-10-22 20:54:52,297 | INFO     | analizzatore.analyzer | Detecting BOM for file: tests_csv\08_big_signal.csv
+2025-10-22 20:54:52,298 | INFO     | analizzatore.analyzer | Detected encoding=utf-8, delimiter=',', header=0
+2025-10-22 20:54:52,298 | INFO     | analizzatore.analyzer | Extracted 2 columns from header row 0.
+2025-10-22 20:54:53,837 | INFO     | analizzatore.loader | CSV caricato: 08_big_signal.csv (righe=200000, colonne=2, col_numeric=0, cleaning=off)
+2025-10-22 20:54:53,848 | INFO     | analizzatore.analyzer | Detecting BOM for file: tests_csv\09_locale_it.csv
+2025-10-22 20:54:53,862 | INFO     | analizzatore.analyzer | Detected encoding=utf-8, delimiter=';', header=0
+2025-10-22 20:54:53,863 | INFO     | analizzatore.analyzer | Extracted 4 columns from header row 0.
+2025-10-22 20:54:53,921 | INFO     | analizzatore.loader | CSV caricato: 09_locale_it.csv (righe=80, colonne=4, col_numeric=3, cleaning=on)
+2025-10-22 20:54:53,921 | INFO     | analizzatore.analyzer | Detecting BOM for file: tests_csv\09_locale_it.csv
+2025-10-22 20:54:53,922 | INFO     | analizzatore.analyzer | Detected encoding=utf-8, delimiter=';', header=0
+2025-10-22 20:54:53,922 | INFO     | analizzatore.analyzer | Extracted 4 columns from header row 0.
+2025-10-22 20:54:53,940 | INFO     | analizzatore.loader | CSV caricato: 09_locale_it.csv (righe=80, colonne=4, col_numeric=0, cleaning=off)
+2025-10-22 20:54:53,942 | INFO     | analizzatore.analyzer | Detecting BOM for file: tests_csv\10_tab_space_thousands.csv
+2025-10-22 20:54:53,953 | INFO     | analizzatore.analyzer | Detected encoding=utf-8, delimiter='	', header=0
+2025-10-22 20:54:53,953 | INFO     | analizzatore.analyzer | Extracted 4 columns from header row 0.
+2025-10-22 20:54:53,980 | INFO     | analizzatore.loader | CSV caricato: 10_tab_space_thousands.csv (righe=96, colonne=4, col_numeric=3, cleaning=on)
+2025-10-22 20:54:53,980 | INFO     | analizzatore.analyzer | Detecting BOM for file: tests_csv\10_tab_space_thousands.csv
+2025-10-22 20:54:53,980 | INFO     | analizzatore.analyzer | Detected encoding=utf-8, delimiter='	', header=0
+2025-10-22 20:54:53,982 | INFO     | analizzatore.analyzer | Extracted 4 columns from header row 0.
+2025-10-22 20:54:54,000 | INFO     | analizzatore.loader | CSV caricato: 10_tab_space_thousands.csv (righe=96, colonne=4, col_numeric=0, cleaning=off)
+2025-10-22 20:54:54,002 | INFO     | analizzatore.analyzer | Detecting BOM for file: tests_csv\11_mixed_tokens.csv
+2025-10-22 20:54:54,019 | INFO     | analizzatore.analyzer | Detected encoding=utf-8, delimiter=',', header=0
+2025-10-22 20:54:54,019 | INFO     | analizzatore.analyzer | Extracted 3 columns from header row 0.
+2025-10-22 20:54:54,033 | INFO     | analizzatore.loader | CSV caricato: 11_mixed_tokens.csv (righe=70, colonne=3, col_numeric=3, cleaning=on)
+2025-10-22 20:54:54,033 | INFO     | analizzatore.analyzer | Detecting BOM for file: tests_csv\11_mixed_tokens.csv
+2025-10-22 20:54:54,034 | INFO     | analizzatore.analyzer | Detected encoding=utf-8, delimiter=',', header=0
+2025-10-22 20:54:54,034 | INFO     | analizzatore.analyzer | Extracted 3 columns from header row 0.
+2025-10-22 20:54:54,048 | INFO     | analizzatore.loader | CSV caricato: 11_mixed_tokens.csv (righe=70, colonne=3, col_numeric=0, cleaning=off)
+2025-10-22 20:54:54,049 | INFO     | analizzatore.analyzer | Detecting BOM for file: tests_csv\12_currency_euro.csv
+2025-10-22 20:54:54,062 | INFO     | analizzatore.analyzer | Detected encoding=utf-8, delimiter=';', header=0
+2025-10-22 20:54:54,063 | INFO     | analizzatore.analyzer | Extracted 5 columns from header row 0.
+2025-10-22 20:54:54,086 | INFO     | analizzatore.loader | CSV caricato: 12_currency_euro.csv (righe=52, colonne=5, col_numeric=4, cleaning=on)
+2025-10-22 20:54:54,086 | INFO     | analizzatore.analyzer | Detecting BOM for file: tests_csv\12_currency_euro.csv
+2025-10-22 20:54:54,087 | INFO     | analizzatore.analyzer | Detected encoding=utf-8, delimiter=';', header=0
+2025-10-22 20:54:54,087 | INFO     | analizzatore.analyzer | Extracted 5 columns from header row 0.
+2025-10-22 20:54:54,104 | INFO     | analizzatore.loader | CSV caricato: 12_currency_euro.csv (righe=52, colonne=5, col_numeric=0, cleaning=off)
+
+================================================================================
+PROFILING CARICAMENTO CSV - 12 files
+================================================================================
+
+
+--------------------------------------------------------------------------------
+File: 01_basic.csv
+--------------------------------------------------------------------------------
+Dimensioni: 0.9 KB | Righe: 50 | Colonne: 1 | Numeriche: 1
+
+Tempi (con cleaning):
+  • Analyze:       13.54 ms
+  • Load+Clean:    18.15 ms
+  • TOTALE:        31.69 ms
+
+Tempi (senza cleaning):
+  • Load only:      4.15 ms
+  • Overhead cleaning:    14.01 ms
+
+Distribuzione tempo:
+  • Analyze:     42.7%
+  • Load+Clean:  57.3%
+
+--------------------------------------------------------------------------------
+File: 02_with_x_numeric.csv
+--------------------------------------------------------------------------------
+Dimensioni: 27.6 KB | Righe: 1,000 | Colonne: 2 | Numeriche: 2
+
+Tempi (con cleaning):
+  • Analyze:       12.52 ms
+  • Load+Clean:    29.19 ms
+  • TOTALE:        41.70 ms
+
+Tempi (senza cleaning):
+  • Load only:     30.20 ms
+  • Overhead cleaning:    -1.01 ms
+
+Distribuzione tempo:
+  • Analyze:     30.0%
+  • Load+Clean:  70.0%
+
+--------------------------------------------------------------------------------
+File: 03_with_x_datetime.csv
+--------------------------------------------------------------------------------
+Dimensioni: 8.5 KB | Righe: 200 | Colonne: 2 | Numeriche: 1
+
+Tempi (con cleaning):
+  • Analyze:       20.99 ms
+  • Load+Clean:    24.15 ms
+  • TOTALE:        45.14 ms
+
+Tempi (senza cleaning):
+  • Load only:     19.06 ms
+  • Overhead cleaning:     5.09 ms
+
+Distribuzione tempo:
+  • Analyze:     46.5%
+  • Load+Clean:  53.5%
+
+--------------------------------------------------------------------------------
+File: 04_noise_signal.csv
+--------------------------------------------------------------------------------
+Dimensioni: 77.4 KB | Righe: 2,000 | Colonne: 2 | Numeriche: 2
+
+Tempi (con cleaning):
+  • Analyze:       22.17 ms
+  • Load+Clean:    47.54 ms
+  • TOTALE:        69.71 ms
+
+Tempi (senza cleaning):
+  • Load only:     35.48 ms
+  • Overhead cleaning:    12.07 ms
+
+Distribuzione tempo:
+  • Analyze:     31.8%
+  • Load+Clean:  68.2%
+
+--------------------------------------------------------------------------------
+File: 05_multicolumn.csv
+--------------------------------------------------------------------------------
+Dimensioni: 38.6 KB | Righe: 500 | Colonne: 4 | Numeriche: 4
+
+Tempi (con cleaning):
+  • Analyze:       14.80 ms
+  • Load+Clean:    37.61 ms
+  • TOTALE:        52.41 ms
+
+Tempi (senza cleaning):
+  • Load only:     32.02 ms
+  • Overhead cleaning:     5.58 ms
+
+Distribuzione tempo:
+  • Analyze:     28.2%
+  • Load+Clean:  71.8%
+
+--------------------------------------------------------------------------------
+File: 06_nan_and_inf.csv
+--------------------------------------------------------------------------------
+Dimensioni: 0.8 KB | Righe: 45 | Colonne: 1 | Numeriche: 1
+
+Tempi (con cleaning):
+  • Analyze:       17.01 ms
+  • Load+Clean:     6.74 ms
+  • TOTALE:        23.75 ms
+
+Tempi (senza cleaning):
+  • Load only:      4.68 ms
+  • Overhead cleaning:     2.06 ms
+
+Distribuzione tempo:
+  • Analyze:     71.6%
+  • Load+Clean:  28.4%
+
+--------------------------------------------------------------------------------
+File: 07_short_signal.csv
+--------------------------------------------------------------------------------
+Dimensioni: 0.0 KB | Righe: 3 | Colonne: 2 | Numeriche: 2
+
+Tempi (con cleaning):
+  • Analyze:       23.98 ms
+  • Load+Clean:     9.47 ms
+  • TOTALE:        33.44 ms
+
+Tempi (senza cleaning):
+  • Load only:      5.53 ms
+  • Overhead cleaning:     3.94 ms
+
+Distribuzione tempo:
+  • Analyze:     71.7%
+  • Load+Clean:  28.3%
+
+--------------------------------------------------------------------------------
+File: 08_big_signal.csv
+--------------------------------------------------------------------------------
+Dimensioni: 7592.6 KB | Righe: 200,000 | Colonne: 2 | Numeriche: 2
+
+Tempi (con cleaning):
+  • Analyze:       18.00 ms
+  • Load+Clean:  1663.42 ms
+  • TOTALE:      1681.43 ms
+
+Tempi (senza cleaning):
+  • Load only:   1544.11 ms
+  • Overhead cleaning:   119.31 ms
+
+Distribuzione tempo:
+  • Analyze:      1.1%
+  • Load+Clean:  98.9%
+
+--------------------------------------------------------------------------------
+File: 09_locale_it.csv
+--------------------------------------------------------------------------------
+Dimensioni: 1.9 KB | Righe: 80 | Colonne: 4 | Numeriche: 3
+
+Tempi (con cleaning):
+  • Analyze:       16.23 ms
+  • Load+Clean:    58.09 ms
+  • TOTALE:        74.32 ms
+
+Tempi (senza cleaning):
+  • Load only:     17.91 ms
+  • Overhead cleaning:    40.18 ms
+
+Distribuzione tempo:
+  • Analyze:     21.8%
+  • Load+Clean:  78.2%
+
+--------------------------------------------------------------------------------
+File: 10_tab_space_thousands.csv
+--------------------------------------------------------------------------------
+Dimensioni: 4.1 KB | Righe: 96 | Colonne: 4 | Numeriche: 3
+
+Tempi (con cleaning):
+  • Analyze:       13.39 ms
+  • Load+Clean:    26.69 ms
+  • TOTALE:        40.08 ms
+
+Tempi (senza cleaning):
+  • Load only:     19.73 ms
+  • Overhead cleaning:     6.96 ms
+
+Distribuzione tempo:
+  • Analyze:     33.4%
+  • Load+Clean:  66.6%
+
+--------------------------------------------------------------------------------
+File: 11_mixed_tokens.csv
+--------------------------------------------------------------------------------
+Dimensioni: 1.6 KB | Righe: 70 | Colonne: 3 | Numeriche: 3
+
+Tempi (con cleaning):
+  • Analyze:       17.50 ms
+  • Load+Clean:    14.20 ms
+  • TOTALE:        31.70 ms
+
+Tempi (senza cleaning):
+  • Load only:     14.32 ms
+  • Overhead cleaning:    -0.13 ms
+
+Distribuzione tempo:
+  • Analyze:     55.2%
+  • Load+Clean:  44.8%
+
+--------------------------------------------------------------------------------
+File: 12_currency_euro.csv
+--------------------------------------------------------------------------------
+Dimensioni: 2.6 KB | Righe: 52 | Colonne: 5 | Numeriche: 4
+
+Tempi (con cleaning):
+  • Analyze:       14.93 ms
+  • Load+Clean:    22.96 ms
+  • TOTALE:        37.89 ms
+
+Tempi (senza cleaning):
+  • Load only:     17.33 ms
+  • Overhead cleaning:     5.63 ms
+
+Distribuzione tempo:
+  • Analyze:     39.4%
+  • Load+Clean:  60.6%
+
+
+================================================================================
+RIEPILOGO
+================================================================================
+
+Tempo totale per 12 files:
+  • Analyze:        205.05 ms (9.5%)
+  • Load+Clean:    1958.21 ms (90.5%)
+  • TOTALE:        2163.27 ms
+  • Overhead cleaning:     213.69 ms (9.9%)
+
+File più lenti:
+  1. 08_big_signal.csv              -  1681.43 ms (200,000 righe)
+  2. 09_locale_it.csv               -    74.32 ms (80 righe)
+  3. 04_noise_signal.csv            -    69.71 ms (2,000 righe)

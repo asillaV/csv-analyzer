@@ -34,7 +34,7 @@ Le chiavi di cache sono tuple hashable che identificano univocamente il risultat
 ```python
 (
     column_name: str,           # Nome della colonna Y
-    file_sig: Tuple,            # (file_name, file_size, hash_first_kb)
+    file_sig: Tuple,            # (session_id, file_size, sha1_prefix)
     fspec_tuple: Tuple,         # astuple(FilterSpec)
     fs_value: Optional[float],  # Frequenza di campionamento (valore)
     fs_source: Optional[str]    # Sorgente di fs: "manual", "datetime", "index", None
@@ -46,11 +46,13 @@ Le chiavi di cache sono tuple hashable che identificano univocamente il risultat
 - Senza `fs_source`: cache key identica → risultati riutilizzati erroneamente ❌
 - Con `fs_source`: `("datetime", 100)` ≠ `("manual", 100)` → cache separata ✅
 
+> Nota (Issue #49): `file_sig` include ora `(session_id, file_size, sha1_prefix)` per garantire isolamento tra sessioni Streamlit.
+
 #### FFT Cache Key
 ```python
 (
     column_name: str,           # Nome della colonna Y
-    file_sig: Tuple,            # (file_name, file_size, hash_first_kb)
+    file_sig: Tuple,            # (session_id, file_size, sha1_prefix)
     is_filtered: bool,          # True se FFT su segnale filtrato
     fftspec_tuple: Tuple,       # astuple(FFTSpec)
     fs_value: float,            # Frequenza di campionamento (valore)
@@ -434,7 +436,7 @@ Output atteso:
 
 **Possibili cause:**
 1. `fs_source` non passato correttamente → cache key sempre diversa
-2. `file_sig` cambia ad ogni caricamento → verifica hash implementation
+2. `file_sig` cambia ad ogni caricamento → verifica builder (session_id + hash)
 3. Cache invalidata troppo spesso → check `_reset_generated_reports_marker()`
 
 **Debug:**

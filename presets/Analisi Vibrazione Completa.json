@@ -1,0 +1,22 @@
+{
+  "version": "1.0",
+  "name": "Analisi Vibrazione Completa",
+  "description": "Butterworth BP 10-100Hz + FFT con detrend e finestra Hann",
+  "created_at": "2025-10-22T21:01:12.930317",
+  "manual_fs": null,
+  "filter": {
+    "kind": "butter_bp",
+    "enabled": true,
+    "order": 4,
+    "cutoff": [
+      10.0,
+      100.0
+    ],
+    "ma_window": 5
+  },
+  "fft": {
+    "enabled": true,
+    "detrend": true,
+    "window": "hann"
+  }
+}
