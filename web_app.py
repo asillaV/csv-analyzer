@@ -85,7 +85,7 @@ PERFORMANCE_MAX_POINTS = 10_000
 PERFORMANCE_METHOD = "lttb"
 
 LIMIT_DEFAULTS = {
-    "max_file_mb": 100,
+    "max_file_mb": 200,
     "max_rows": 1_000_000,
     "max_cols": 500,
     "parse_timeout_s": 30,
