@@ -88,7 +88,7 @@ LIMIT_DEFAULTS = {
     "max_file_mb": 200,
     "max_rows": 1_000_000,
     "max_cols": 500,
-    "parse_timeout_s": 30,
+    "parse_timeout_s": 120,
 }
 
 
