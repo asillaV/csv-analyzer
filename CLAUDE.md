@@ -36,7 +36,40 @@ python -m pip install -r requirements.txt
 
 ### Testing
 
-No automated test suite is currently present. Manual testing uses sample CSV files in the `tests_csv/` directory that cover various edge cases:
+**Automated Test Suite:** Comprehensive pytest-based test suite with 80%+ coverage target on core modules.
+
+```bash
+# Run all tests with coverage
+pytest tests/ -v --cov=core --cov-report=term-missing
+
+# Run specific test module
+pytest tests/test_signal_tools.py -v
+
+# Run tests by marker
+pytest -m unit -v
+pytest -m integration -v
+```
+
+**Test Structure:**
+- `tests/` - Test modules for all core components
+- `tests/fixtures/` - Synthetic signal generators for validation
+- `tests/conftest.py` - Shared fixtures and configuration
+- `tests/manual/` - Manual test CSVs for edge cases
+
+**Test Coverage:**
+- ✅ `test_analyzer.py` - CSV metadata detection
+- ✅ `test_csv_cleaner.py` - Numeric cleaning and format detection
+- ✅ `test_signal_tools.py` - Filters, FFT, fs resolution
+- ✅ `test_loader.py` - CSV loading pipeline
+- ✅ `test_preset_manager.py` - Preset save/load
+- ✅ `test_quality.py` - Data quality checks
+- ✅ `test_downsampling.py` - LTTB/minmax downsampling
+- ✅ `test_web_app_session.py` - Streamlit session state
+- ✅ `test_optimization_safety.py` - dtype optimization safety
+- ⚡ `benchmark_*.py` - Performance benchmarks
+- ⚡ `profile_*.py` - Performance profiling
+
+**Manual Test CSVs** (`tests_csv/`):
 - Basic numeric data (`01_basic.csv`)
 - Numeric X axis (`02_with_x_numeric.csv`)
 - Datetime X axis (`03_with_x_datetime.csv`)
@@ -49,6 +82,8 @@ No automated test suite is currently present. Manual testing uses sample CSV fil
 - Various thousands separators (`10_tab_space_thousands.csv`)
 - Mixed numeric tokens (`11_mixed_tokens.csv`)
 - Currency symbols (`12_currency_euro.csv`)
+
+**CI/CD:** Tests run automatically on GitHub Actions (Python 3.10-3.12, Ubuntu/Windows).
 
 ## Architecture
 
@@ -111,6 +146,57 @@ This design prevents:
 - Supports detrending and windowing (Hann/others via SciPy)
 - Returns (frequencies, amplitudes) or empty arrays if invalid
 
+#### Data Quality (`quality.py`)
+
+**Non-blocking quality checks** that provide warnings without interrupting workflow:
+
+- **X-axis Monotonicity**: Detects duplicate/decreasing values in time series
+- **Gap Detection**: Finds irregular sampling where `dt > k * median(dt)`
+- **Spike Detection**: Identifies outliers using robust Z-score (median + MAD)
+- Returns `DataQualityReport` with:
+  - Issue list with examples and percentages
+  - Configurable thresholds (`gap_factor_k`, `spike_z`)
+  - Notes for UI display (e.g., "irregular sampling may affect FFT")
+
+#### Downsampling (`downsampling.py`)
+
+**Performance optimization for large datasets** without sacrificing visual fidelity:
+
+- **LTTB Algorithm**: Largest-Triangle-Three-Buckets preserves visual features
+- **MinMax Method**: Captures peaks and valleys in high-frequency signals
+- `downsample_series()` returns `DownsampleResult` with:
+  - Downsampled x/y series with original index alignment
+  - Reduction ratio and method used
+  - Original vs sampled count
+- **Design principle**: Filters and FFT always use original data; downsampling only for rendering
+- Default: 10,000 points per trace for datasets > 100k rows
+
+#### Preset Management (`preset_manager.py`)
+
+**Save/load analysis configurations** for reproducible workflows:
+
+- Saves `FilterSpec` + `FFTSpec` + `manual_fs` to JSON files in `presets/`
+- Filename sanitization prevents path traversal vulnerabilities
+- Schema versioning (`PRESET_VERSION = "1.0"`) for future compatibility
+- `list_presets()` returns metadata without loading full specs
+- Five default presets included:
+  - "Media Mobile 5/20" - Light/heavy smoothing
+  - "Butterworth LP 50Hz" - Low-pass filtering
+  - "Analisi Vibrazione Completa" - BP filter + FFT
+  - "Solo FFT" - FFT analysis without filtering
+
+#### Plotting (`plot_manager.py`)
+
+**Centralized Plotly plotting** with advanced features:
+
+- **Data Cleaning**: Handles European/US decimal formats, removes inf/nan
+- **X-axis Slicing**: Supports numeric, datetime, and positional ranges
+- **Downsampling**: Equispaced downsampling to `max_points_per_trace`
+- **Plot Modes**: Overlay (single figure) or Separate (one per series)
+- **Configuration**: Reads from `config.json` for defaults
+- **Output**: Saves HTML to `outputs/` and optionally opens in browser
+- Used by TUI and desktop apps; web app has its own integrated plotting
+
 #### Reporting
 
 - **`report_manager.py`** - `ReportManager` generates statistical reports:
@@ -133,9 +219,14 @@ Three independent UIs share the same core logic:
 1. **`web_app.py`** (Streamlit) - Most feature-rich:
    - Advanced panel for fs override, filters, FFT
    - Three plot modes: overlaid, separate tabs, cascade
+   - **Preset system**: Save/load analysis configurations
+   - **Data quality checks**: Displays warnings for monotonicity, gaps, spikes
+   - **Performance mode**: Auto-enables LTTB downsampling for datasets > 100k rows
+   - **dtype optimization**: Reduces memory usage by downcasting numeric types
    - Visual report generation with per-plot customization
    - File upload with sample CSV loading
-   - Caching for performance (important: uses file hash + cleaning flag as cache key)
+   - Caching for performance (uses file hash + cleaning flag + optimization settings as cache key)
+   - Configurable limits via `config.json` (max file size, rows, columns, timeout)
 
 2. **`ui/desktop_app.py`** (Tkinter):
    - Classic desktop interface
@@ -148,17 +239,54 @@ Three independent UIs share the same core logic:
    - Checkbox-based Y column selection
    - HTML plot preview in browser
 
+### Configuration (`config.json`)
+
+The application reads configuration from `config.json` in the project root:
+
+```json
+{
+  "quality": {
+    "gap_factor_k": 5.0,      // Gap detection threshold multiplier
+    "spike_z": 4.0,           // Spike detection Z-score threshold
+    "min_points": 20,         // Minimum points for robust checks
+    "max_examples": 5         // Examples per quality issue
+  },
+  "performance": {
+    "optimize_dtypes": true,           // Enable memory optimization
+    "aggressive_dtype_optimization": false  // Unsafe: may lose precision
+  },
+  "limits": {
+    "max_file_mb": 200,       // Maximum CSV file size
+    "max_rows": 1000000,      // Maximum rows to load
+    "max_cols": 500,          // Maximum columns
+    "parse_timeout_s": 120    // Timeout for parsing operations
+  }
+}
+```
+
+**Used by:** `web_app.py` (limits enforcement), `quality.py` (check thresholds), `loader.py` (optimization settings)
+
 ### Key Design Patterns
 
 **Performance Considerations:**
 - `csv_cleaner.py` uses vectorized pandas operations (NOT row-by-row iteration)
 - Caching in `web_app.py` prevents re-parsing on parameter changes
 - Large CSV handling via `MAX_SAMPLE_VALUES` limit in format detection
+- **LTTB downsampling**: Renders 10k points instead of full dataset for large files (>100k rows)
+- **dtype optimization**: Automatically downcasts numeric types to reduce memory (int64→int32, float64→float32)
+- **Multiprocessing**: Optional for time-consuming operations (configurable per-UI)
 
 **Error Handling Philosophy:**
 - Validation functions return `(bool, message)` tuples for UI display
 - Filter/FFT functions raise `ValueError` with human-readable messages
 - UIs catch exceptions and show warnings/errors without crashing
+- Quality checks are non-blocking: display warnings but continue workflow
+
+**Security Considerations:**
+- Preset filenames are sanitized to prevent path traversal attacks
+- File size limits prevent memory exhaustion attacks
+- Parse timeout prevents DoS via malformed CSVs
+- No arbitrary code execution (JSON-only config files)
 
 **Conditional Dependencies:**
 - SciPy: optional, Butterworth filters disabled if missing
@@ -202,6 +330,33 @@ f"vis_report_ylabel::{column_name}"
 ```
 When columns are deselected, their state is purged to prevent stale data.
 
+### Preset System Workflow
+When working with presets for reproducible analyses:
+1. **Creating a preset**: Collect `FilterSpec`, `FFTSpec`, and `manual_fs` from UI
+2. Call `save_preset(name, description, fspec, fftspec, manual_fs)`
+3. **Loading a preset**: Call `load_preset(name)` which returns a dict with all specs
+4. Apply the loaded specs to UI widgets (set session state in Streamlit)
+5. **Default presets**: Call `create_default_presets()` on app startup to ensure base presets exist
+6. **Security**: Never use user-provided preset names directly in file paths; always use `_preset_path()` with sanitization
+
+### Performance Mode
+The Streamlit app includes a "Performance Mode" toggle:
+- **Auto-enabled** when dataset has > 100k rows
+- Uses LTTB downsampling to reduce rendering to ~10k points per trace
+- **Critical**: Filtering and FFT always use original data; downsampling only affects plot rendering
+- Users can toggle to "High Fidelity" mode to render all points (may cause browser lag)
+- Status displayed: "Performance: 500,000 → 10,000 (50.0x, lttb)"
+
+### Data Quality Workflow
+Quality checks are performed after CSV loading and displayed as expandable warnings:
+1. Load CSV with `load_csv()`
+2. Call `run_quality_checks(df, x_col, y_cols, **config)`
+3. Display `DataQualityReport` in UI:
+   - Show summary: "Data quality: WARNING (x_gap=5, y_spike=2)"
+   - List each issue with count, percentage, and examples
+   - Display soft recommendations (e.g., "irregular sampling may affect FFT")
+4. **Never block workflow**: Users can proceed with analysis even with quality warnings
+
 ## Output Structure
 
 ```
@@ -215,8 +370,26 @@ outputs/
 logs/
   analizzatore_YYYYMMDD.log
 
+presets/
+  *.json              # Saved analysis configurations (FilterSpec + FFTSpec + fs)
+
+tests/
+  *.py                # Automated test suite with pytest
+  fixtures/           # Synthetic signal generators
+  manual/             # Manual test files
+  profile_results.txt # Performance profiling results
+
 tests_csv/
-  *.csv               # Test cases covering edge cases
+  *.csv               # Manual test cases covering edge cases
+
+docs/
+  *.md                # Additional documentation and guides
+
+patches/
+  *.diff              # Patch files for specific issues/features
+
+scripts/
+  csv_spawner.py      # Generate synthetic CSV test files
 ```
 
 ## Common Gotchas
@@ -235,8 +408,42 @@ tests_csv/
 
 7. **CSV encoding edge cases**: BOM detection handles UTF-16 LE/BE and UTF-8-sig. Always use detected encoding when reading with pandas.
 
+8. **Downsampling vs. processing**: LTTB/minmax downsampling is for rendering only. Filters and FFT must always operate on the original, full-resolution data before any downsampling.
+
+9. **Quality checks are non-blocking**: `run_quality_checks()` returns warnings but never raises exceptions. Display the warnings to users but allow them to continue their workflow.
+
+10. **Preset JSON tuple handling**: JSON doesn't support tuples, so `FilterSpec.cutoff` (which can be a tuple) is stored as a list in preset files and converted back to tuple on load.
+
+11. **dtype optimization safety**: Use `optimize_dtypes=True` for safe optimization (respects ranges). Never use `aggressive_dtype_optimization=True` in production as it may cause precision loss.
+
+12. **Config.json errors**: If `config.json` is missing or malformed, the application uses hardcoded defaults (`LIMIT_DEFAULTS` in web_app.py). Don't crash on bad config.
+
+13. **Performance thresholds**: Web app auto-enables performance mode at 100k rows (`PERFORMANCE_THRESHOLD`). When manually toggling, ensure state is properly propagated to plotting logic.
+
+14. **Preset name conflicts**: `preset_exists()` checks before saving. If overwriting an existing preset, either delete first with `delete_preset()` or handle the overwrite in UI logic.
+
 ## Dependencies
 
 Core scientific: pandas ≥2.2, numpy ≥1.26, plotly[kaleido] ≥5.22, scipy ≥1.12
 UI: streamlit ≥1.32, textual 0.89-0.90, rich ≥13.9
 Optional: kaleido ≥0.2.1 (PNG/PDF export)
+Testing: pytest ≥7.0, pytest-cov (for coverage reports)
+
+## Additional Documentation
+
+The repository includes several specialized documentation files:
+
+- **`README.md`** - Main project documentation with features, screenshots, and quick start
+- **`CACHE_IMPLEMENTATION.md`** - Deep dive into Streamlit caching strategy and file signature system
+- **`PERFORMANCE_OPTIMIZATION_REPORT.md`** - Performance improvements, benchmarks, and optimization strategies
+- **`FIX_FFT_CHECKBOX.md`** - Technical notes on FFT checkbox state management issue
+- **`PIANO_OTTIMIZZAZIONE_CSV.md`** - Italian: CSV parsing optimization plan
+- **`PIANO_OTTIMIZZAZIONE_SICUREZZA.md`** - Italian: Security optimization and hardening plan
+- **`tests/README.md`** - Test suite documentation with fixtures, coverage targets, and CI/CD info
+- **`docs/`** - Additional guides and technical documentation
+
+Consult these files when working on:
+- Performance tuning: `PERFORMANCE_OPTIMIZATION_REPORT.md`
+- Cache debugging: `CACHE_IMPLEMENTATION.md`
+- Adding tests: `tests/README.md`
+- Security hardening: `PIANO_OTTIMIZZAZIONE_SICUREZZA.md`
