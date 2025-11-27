@@ -105,11 +105,17 @@ The application follows a modular architecture with separation between data proc
    - Vectorized pandas operations for performance (critical for large CSVs)
    - Returns `CleaningReport` with per-column conversion statistics
 
-3. **`loader.py`** - `load_csv()` function orchestrates the pipeline:
-   - Uses metadata from `analyzer.py`
-   - Applies cleaning via `csv_cleaner.py`
+3. **`loader.py` / `loader_optimized.py`** - CSV loading with automatic optimization:
+   - **`loader.py`**: Legacy loader for small files (< 50 MB)
+   - **`loader_optimized.py`**: Optimized loader with chunked reading for large files
+   - Auto-detection of optimal loading strategy based on file size/rows
+   - **Chunked loading**: Reduces RAM peak by 45% for large files (500k rows: 1.6 GB → 890 MB)
+   - **Stratified sampling**: Fast preview of large files without full load
+   - Progress callback support for UI integration
+   - Uses metadata from `analyzer.py` and cleaning from `csv_cleaner.py`
    - Returns cleaned DataFrame with optional detailed report
    - Supports custom decimal/thousands override
+   - **Thresholds**: Files > 50 MB or > 100k rows use chunked loader
 
 #### Signal Processing (`signal_tools.py`)
 
@@ -272,8 +278,14 @@ The application reads configuration from `config.json` in the project root:
 - `csv_cleaner.py` uses vectorized pandas operations (NOT row-by-row iteration)
 - Caching in `web_app.py` prevents re-parsing on parameter changes
 - Large CSV handling via `MAX_SAMPLE_VALUES` limit in format detection
+- **Chunked CSV loading** (`loader_optimized.py`): Reduces RAM peak by 45% for large files
+  - Files < 50 MB: standard loader (legacy, fastest for small files)
+  - Files > 50 MB or > 100k rows: chunked loader (lower memory footprint)
+  - Benchmark: 500k rows file uses 890 MB RAM vs 1.6 GB with standard loader
+- **Stratified sampling**: Fast preview of large files without loading all data
 - **LTTB downsampling**: Renders 10k points instead of full dataset for large files (>100k rows)
 - **dtype optimization**: Automatically downcasts numeric types to reduce memory (int64→int32, float64→float32)
+- **Progress tracking**: UI callbacks for long-running operations
 - **Multiprocessing**: Optional for time-consuming operations (configurable per-UI)
 
 **Error Handling Philosophy:**
@@ -422,6 +434,8 @@ scripts/
 
 14. **Preset name conflicts**: `preset_exists()` checks before saving. If overwriting an existing preset, either delete first with `delete_preset()` or handle the overwrite in UI logic.
 
+15. **Chunked loader vs legacy loader**: `loader_optimized.py` auto-selects strategy based on file size. Use `use_optimization=False` to force legacy loader for debugging. Files < 50 MB use legacy loader by default (faster for small files).
+
 ## Dependencies
 
 Core scientific: pandas ≥2.2, numpy ≥1.26, plotly[kaleido] ≥5.22, scipy ≥1.12
@@ -436,6 +450,7 @@ The repository includes several specialized documentation files:
 - **`README.md`** - Main project documentation with features, screenshots, and quick start
 - **`CACHE_IMPLEMENTATION.md`** - Deep dive into Streamlit caching strategy and file signature system
 - **`PERFORMANCE_OPTIMIZATION_REPORT.md`** - Performance improvements, benchmarks, and optimization strategies
+- **`docs/OTTIMIZZAZIONE_CARICAMENTO_CSV.md`** - CSV loading optimization guide (chunked loading, sampling, benchmarks)
 - **`FIX_FFT_CHECKBOX.md`** - Technical notes on FFT checkbox state management issue
 - **`PIANO_OTTIMIZZAZIONE_CSV.md`** - Italian: CSV parsing optimization plan
 - **`PIANO_OTTIMIZZAZIONE_SICUREZZA.md`** - Italian: Security optimization and hardening plan

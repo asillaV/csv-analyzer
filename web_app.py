@@ -20,8 +20,24 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from core.analyzer import analyze_csv
-from core.loader import load_csv, optimize_dtypes
 from core.csv_cleaner import CleaningReport
+
+# Import condizionale: usa loader ottimizzato se configurato
+import json
+_use_optimized = True  # Default
+try:
+    with open("config.json") as f:
+        _config = json.load(f)
+        _use_optimized = _config.get("performance", {}).get("use_optimized_loader", True)
+except Exception:
+    pass
+
+if _use_optimized:
+    from core.loader_optimized import load_csv
+    LOADER_TYPE = "optimized"
+else:
+    from core.loader import load_csv
+    LOADER_TYPE = "legacy"
 from core.report_manager import ReportManager
 from core.visual_report_manager import VisualPlotSpec, VisualReportManager
 from core.downsampling import downsample_series, DownsampleResult
@@ -2274,6 +2290,11 @@ def main():
     st.divider()
     with st.expander("ℹ️ Info rilevate (clicca per espandere)", expanded=False):
         st.json(meta)
+
+    # Footer: mostra loader type
+    loader_emoji = "🚀" if LOADER_TYPE == "optimized" else "📦"
+    loader_desc = "Ottimizzato (chunked)" if LOADER_TYPE == "optimized" else "Standard"
+    st.caption(f"{loader_emoji} Loader: {loader_desc}")
 
 
 if __name__ == "__main__":
