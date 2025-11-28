@@ -11,7 +11,7 @@
     "use_optimized_loader": true,
     "chunked_loading_threshold_mb": 800,
     "rows_threshold": 100000,
-    "chunk_size": 100000,
+    "chunk_size": 200000,
     "sample_size": 50000,
     "advanced": {
       "use_pyarrow": true,
@@ -23,8 +23,8 @@
   },
   "limits": {
     "max_file_mb": 4096,
-    "max_rows": 1000000,
-    "max_cols": 5000,
-    "parse_timeout_s": 240
+    "max_rows": 100000000,
+    "max_cols": 50000,
+    "parse_timeout_s": 1200
   }
 }
