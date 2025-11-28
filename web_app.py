@@ -57,6 +57,7 @@ RESETTABLE_KEYS = {
     "x_max_txt",
     "y_min_txt",
     "y_max_txt",
+    "fillna_forward",
     # Advanced
     "manual_fs",
     "enable_filter",
@@ -245,21 +246,32 @@ def _init_result_caches() -> None:
 
 
 def _get_filter_cache_key(
-    column: str, file_sig: FileSignature, fspec: FilterSpec, fs: Optional[float], fs_source: Optional[str]
+    column: str,
+    file_sig: FileSignature,
+    fspec: FilterSpec,
+    fs: Optional[float],
+    fs_source: Optional[str],
+    fill_stamp: bool,
 ) -> Tuple:
     """Generate hashable cache key for filter results."""
     from dataclasses import astuple
-    # Include fs and fs_source in key to invalidate when sampling frequency or source changes
-    return (column, file_sig, astuple(fspec), fs, fs_source)
+    # Include fs, fs_source e stato del fill per invalidare correttamente
+    return (column, file_sig, astuple(fspec), fs, fs_source, fill_stamp)
 
 
 def _get_fft_cache_key(
-    column: str, file_sig: FileSignature, is_filtered: bool, fftspec: FFTSpec, fs: float, fs_source: Optional[str]
+    column: str,
+    file_sig: FileSignature,
+    is_filtered: bool,
+    fftspec: FFTSpec,
+    fs: float,
+    fs_source: Optional[str],
+    fill_stamp: bool,
 ) -> Tuple:
     """Generate hashable cache key for FFT results."""
     from dataclasses import astuple
-    # Include fs_source to invalidate when fs changes from estimated to manual
-    return (column, file_sig, is_filtered, astuple(fftspec), fs, fs_source)
+    # Include fs_source e stato del fill per invalidare quando cambiano questi parametri
+    return (column, file_sig, is_filtered, astuple(fftspec), fs, fs_source, fill_stamp)
 
 
 def _get_cached_filter(key: Tuple) -> Optional[pd.Series]:
@@ -306,10 +318,11 @@ def _apply_filter_cached(
     fs_source: Optional[str],
     file_sig: FileSignature,
     column_name: str,
+    fill_stamp: bool,
 ) -> Optional[pd.Series]:
     """Apply filter with caching. Returns filtered series or None if filter fails."""
     _init_result_caches()
-    cache_key = _get_filter_cache_key(column_name, file_sig, fspec, fs_value, fs_source)
+    cache_key = _get_filter_cache_key(column_name, file_sig, fspec, fs_value, fs_source, fill_stamp)
     cached = _get_cached_filter(cache_key)
     if cached is not None:
         if cached.index.equals(series.index):
@@ -338,10 +351,11 @@ def _compute_fft_cached(
     file_sig: FileSignature,
     column_name: str,
     is_filtered: bool,
+    fill_stamp: bool,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Compute FFT with caching. Returns (freqs, amp) arrays."""
     _init_result_caches()
-    cache_key = _get_fft_cache_key(column_name, file_sig, is_filtered, fftspec, fs_value, fs_source)
+    cache_key = _get_fft_cache_key(column_name, file_sig, is_filtered, fftspec, fs_value, fs_source, fill_stamp)
     cached = _get_cached_fft(cache_key)
     if cached is not None:
         return cached
@@ -366,6 +380,7 @@ def _reset_all_settings() -> None:
     st.session_state.pop("_generated_report_error", None)
     st.session_state.pop("_generated_visual_report", None)
     st.session_state.pop("_generated_visual_report_error", None)
+    st.session_state.pop("_fill_last_stamp", None)
 
     # Reset visual report tracking state
     st.session_state.pop("_visual_report_prev_selection", None)
@@ -527,6 +542,18 @@ def _cleaning_stats_table(report: CleaningReport) -> pd.DataFrame:
         ]
     )
 
+def _to_datetime_flexible(values: Any) -> pd.Series:
+    """
+    Converte in datetime riducendo i warning di inferenza formato.
+
+    Usa format=\"mixed\" se disponibile (pandas >=2.1) e ripiega su
+    to_datetime standard se non supportato.
+    """
+    try:
+        return pd.to_datetime(values, errors="coerce", format="mixed")  # type: ignore[arg-type]
+    except TypeError:
+        return pd.to_datetime(values, errors="coerce")  # type: ignore[arg-type]
+
 def _parse_x_column_once(df: pd.DataFrame, x_col: Optional[str]) -> Optional[pd.Series]:
     """
     FIX ISSUE #52: Pre-converti colonna X una volta sola prima del loop plot.
@@ -548,7 +575,7 @@ def _parse_x_column_once(df: pd.DataFrame, x_col: Optional[str]) -> Optional[pd.
 
     # Se già datetime/timedelta, converti e ritorna
     if pd.api.types.is_datetime64_any_dtype(xraw) or pd.api.types.is_timedelta64_dtype(xraw):
-        return pd.to_datetime(xraw, errors="coerce")
+        return _to_datetime_flexible(xraw)
 
     # Prova coerzione numerica
     xnum = pd.to_numeric(xraw, errors="coerce")
@@ -557,7 +584,7 @@ def _parse_x_column_once(df: pd.DataFrame, x_col: Optional[str]) -> Optional[pd.
 
     # Fallback: stringhe/datetime
     try:
-        xdt = pd.to_datetime(xraw, errors="coerce")
+        xdt = _to_datetime_flexible(xraw)
         return xdt
     except Exception:
         return None
@@ -594,14 +621,14 @@ def _make_time_series(
     if x_col and x_col in df.columns:
         xraw = df[x_col]
         if pd.api.types.is_datetime64_any_dtype(xraw) or pd.api.types.is_timedelta64_dtype(xraw):
-            return y, pd.to_datetime(xraw, errors="coerce")
+            return y, _to_datetime_flexible(xraw)
         # prova coerzione numerica
         xnum = pd.to_numeric(xraw, errors="coerce")
         if xnum.notna().mean() >= 0.8:
             return y, xnum
         # fallback: stringhe/datetime
         try:
-            xdt = pd.to_datetime(xraw, errors="coerce")
+            xdt = _to_datetime_flexible(xraw)
             return y, xdt
         except Exception:
             pass
@@ -1274,6 +1301,12 @@ def main():
     else:
         st.session_state.setdefault(quality_key, default_quality)
 
+    # Reset forward fill su nuovo file per evitare stati appiccicosi
+    if st.session_state.get("_fill_file_sig") != file_sig:
+        st.session_state["_fill_file_sig"] = file_sig
+        st.session_state["fillna_forward"] = False
+        st.session_state["_fill_last_stamp"] = False
+
     # Pulsante Reset impostazioni (non rimuove il file caricato)
     rc1, rc2 = st.columns([3, 1])
     with rc2:
@@ -1350,6 +1383,11 @@ def main():
     # --- Controlli (form) --- #
     with st.form(f"controls_{st.session_state.get('_controls_nonce', 0)}"):
         x_col = st.selectbox("Colonna X (opzionale)", options=["—"] + cols, index=0)
+        fill_missing = st.checkbox(
+            "Riempimento valori mancanti (forward fill)",
+            key="fillna_forward",
+            help="Applica un forward fill alle colonne per colmare eventuali NaN.",
+        )
         y_cols = st.multiselect("Colonne Y", options=cols)
         mode = st.radio("Modalità grafico", ["Sovrapposto", "Separati", "Cascata"], horizontal=True, index=0)
         quality_mode = st.radio(
@@ -1425,13 +1463,20 @@ def main():
                 horizontal=True,
                 disabled=not fft_available,
             )
-            detrend = st.checkbox(
-                "Detrend (togli media)",
-                value=preset_detrend,
-                disabled=not fft_available,
-            )
+        detrend = st.checkbox(
+            "Detrend (togli media)",
+            value=preset_detrend,
+            disabled=not fft_available,
+        )
 
         submitted = st.form_submit_button("Applica / Plot")
+
+    fill_stamp = bool(fill_missing)
+    # Se il flag cambia, invalida cache filter/FFT per evitare grafici stantii
+    prev_fill = st.session_state.get("_fill_last_stamp", fill_stamp)
+    if prev_fill != fill_stamp:
+        _invalidate_result_caches()
+        st.session_state["_fill_last_stamp"] = fill_stamp
 
     # ---- PRESET CONFIGURAZIONI (FUORI DAL FORM) ----
     with st.expander("Preset Configurazioni", expanded=False):
@@ -1516,16 +1561,25 @@ def main():
         st.warning("Seleziona almeno una colonna Y.")
         return
 
+    if fill_missing:
+        nan_before = int(df.isna().sum().sum())
+        df = df.ffill()
+        nan_after = int(df.isna().sum().sum())
+        filled_cells = max(nan_before - nan_after, 0)
+        st.caption(
+            f"Forward fill attivo: {filled_cells:,} celle riempite; NaN residui: {nan_after:,}."
+        )
+
     x_name = x_col if (x_col and x_col != "—") else None
     x_values = None
     if x_name and x_name in df.columns:
         # cerco di mantenere il tipo più utile possibile
         if pd.api.types.is_datetime64_any_dtype(df[x_name]) or pd.api.types.is_timedelta64_dtype(df[x_name]):
-            x_values = pd.to_datetime(df[x_name], errors="coerce")
+            x_values = _to_datetime_flexible(df[x_name])
         else:
             # preferisco numerico se coerente
             xnum = pd.to_numeric(df[x_name], errors="coerce")
-            x_values = xnum if xnum.notna().mean() >= 0.8 else pd.to_datetime(df[x_name], errors="coerce")
+            x_values = xnum if xnum.notna().mean() >= 0.8 else _to_datetime_flexible(df[x_name])
 
     # Risolvo fs UNA SOLA VOLTA
     fs_info = resolve_fs(x_values, manual_fs if manual_fs > 0 else None)
@@ -1635,27 +1689,31 @@ def main():
     if performance_enabled and total_rows > PERFORMANCE_MAX_POINTS:
         # Usa prima colonna Y o X per determinare gli indici di decimazione
         representative_col = y_cols[0] if y_cols else None
+        ds_result: Optional[DownsampleResult] = None
         if representative_col:
             y_repr = pd.to_numeric(df[representative_col], errors="coerce")
             x_repr = x_values if x_values is not None else None
 
-            # Calcola indici di downsampling
-            ds_result = downsample_series(
-                y_repr,
-                x_repr,
-                max_points=PERFORMANCE_MAX_POINTS,
-                method=PERFORMANCE_METHOD,
-            )
-
-            # Pre-decima DF intero usando gli indici
-            if ds_result.sampled_count < total_rows:
-                df_plot = df.iloc[ds_result.indices].copy()
-                df_downsampled = True
-                downsampled_metadata = ds_result
-                st.caption(
-                    f"⚡ Pre-decimazione: {total_rows:,} → {len(df_plot):,} righe "
-                    f"({ds_result.reduction_ratio:.1f}×, {ds_result.method.upper()})"
+            if y_repr.dropna().empty:
+                st.warning("Downsampling saltato: la serie rappresentativa non ha valori numerici.")
+            else:
+                # Calcola indici di downsampling
+                ds_result = downsample_series(
+                    y_repr,
+                    x_repr,
+                    max_points=PERFORMANCE_MAX_POINTS,
+                    method=PERFORMANCE_METHOD,
                 )
+
+        # Pre-decima DF intero usando gli indici
+        if ds_result and ds_result.sampled_count < total_rows:
+            df_plot = df.iloc[ds_result.indices].copy()
+            df_downsampled = True
+            downsampled_metadata = ds_result
+            st.caption(
+                f"⚡ Pre-decimazione: {total_rows:,} → {len(df_plot):,} righe "
+                f"({ds_result.reduction_ratio:.1f}×, {ds_result.method.upper()})"
+            )
 
     # FIX ISSUE #52: Pre-converti X UNA volta sola (per plot, evita ri-conversioni per ogni Y)
     # Posizionato DOPO df_plot per accedere sia a df che df_plot
@@ -1735,7 +1793,16 @@ def main():
                 y_plot = series
             else:
                 if fspec.enabled:
-                    y_filt_full = _apply_filter_cached(series_full, x_full, fspec, fs_value, fs_info.source, file_sig, yname)
+                    y_filt_full = _apply_filter_cached(
+                        series_full,
+                        x_full,
+                        fspec,
+                        fs_value,
+                        fs_info.source,
+                        file_sig,
+                        yname,
+                        fill_stamp,
+                    )
                     if y_filt_full is None:
                         st.warning(f"Filtro non applicato a {yname}: errore nel calcolo.")
                         y_plot = series
@@ -1806,7 +1873,16 @@ def main():
                     continue
                 y_filt = None
                 if fspec.enabled:
-                    y_filt = _apply_filter_cached(series, x_ser, fspec, fs_value, fs_info.source, file_sig, yname)
+                    y_filt = _apply_filter_cached(
+                        series,
+                        x_ser,
+                        fspec,
+                        fs_value,
+                        fs_info.source,
+                        file_sig,
+                        yname,
+                        fill_stamp,
+                    )
                 y_fft = y_filt if (fspec.enabled and y_filt is not None and fft_use == "Filtrato (se attivo)") else series
                 if not fs_value or fs_value <= 0:
                     st.warning(f"FFT non calcolata per {yname}: fs non disponibile.")
@@ -1815,7 +1891,16 @@ def main():
                     st.warning(f"FFT non calcolata per {yname}: {detail}")
                 else:
                     is_filt = fspec.enabled and y_filt_full is not None and fft_use == "Filtrato (se attivo)"
-                    freqs, amp = _compute_fft_cached(y_fft, fs_value, fs_info.source, fftspec, file_sig, yname, is_filt)
+                    freqs, amp = _compute_fft_cached(
+                        y_fft,
+                        fs_value,
+                        fs_info.source,
+                        fftspec,
+                        file_sig,
+                        yname,
+                        is_filt,
+                        fill_stamp,
+                    )
                     if freqs.size == 0:
                         st.info(f"FFT non calcolabile per {yname} (serie troppo corta o parametri non validi).")
                     else:
@@ -1846,7 +1931,16 @@ def main():
                 y_plot = series
             else:
                 if fspec.enabled:
-                    y_filt_full = _apply_filter_cached(series_full, x_full, fspec, fs_value, fs_info.source, file_sig, yname)
+                    y_filt_full = _apply_filter_cached(
+                        series_full,
+                        x_full,
+                        fspec,
+                        fs_value,
+                        fs_info.source,
+                        file_sig,
+                        yname,
+                        fill_stamp,
+                    )
                     if y_filt_full is None:
                         host.warning(f"Filtro non applicato a {yname}: errore nel calcolo.")
                         y_plot = series
@@ -1900,7 +1994,16 @@ def main():
                     host.warning(f"FFT non calcolata per {yname}: {detail}")
                 else:
                     is_filt = fspec.enabled and y_filt_full is not None and fft_use == "Filtrato (se attivo)"
-                    freqs, amp = _compute_fft_cached(y_fft, fs_value, fs_info.source, fftspec, file_sig, yname, is_filt)
+                    freqs, amp = _compute_fft_cached(
+                        y_fft,
+                        fs_value,
+                        fs_info.source,
+                        fftspec,
+                        file_sig,
+                        yname,
+                        is_filt,
+                        fill_stamp,
+                    )
                     if freqs.size == 0:
                         host.info(f"FFT non calcolabile per {yname} (serie troppo corta o parametri non validi).")
                     else:
@@ -1929,7 +2032,16 @@ def main():
                 y_plot = series
             else:
                 if fspec.enabled:
-                    y_filt_full = _apply_filter_cached(series_full, x_full, fspec, fs_value, fs_info.source, file_sig, yname)
+                    y_filt_full = _apply_filter_cached(
+                        series_full,
+                        x_full,
+                        fspec,
+                        fs_value,
+                        fs_info.source,
+                        file_sig,
+                        yname,
+                        fill_stamp,
+                    )
                     if y_filt_full is None:
                         st.warning(f"Filtro non applicato a {yname}: errore nel calcolo.")
                         y_plot = series
@@ -1983,7 +2095,16 @@ def main():
                     st.warning(f"FFT non calcolata per {yname}: {detail}")
                 else:
                     is_filt = fspec.enabled and y_filt_full is not None and fft_use == "Filtrato (se attivo)"
-                    freqs, amp = _compute_fft_cached(y_fft, fs_value, fs_info.source, fftspec, file_sig, yname, is_filt)
+                    freqs, amp = _compute_fft_cached(
+                        y_fft,
+                        fs_value,
+                        fs_info.source,
+                        fftspec,
+                        file_sig,
+                        yname,
+                        is_filt,
+                        fill_stamp,
+                    )
                     if freqs.size == 0:
                         st.info(f"FFT non calcolabile per {yname} (serie troppo corta o parametri non validi).")
                     else:
