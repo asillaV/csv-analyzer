@@ -635,6 +635,22 @@ def _make_time_series(
     return y, None
 
 
+def _mask_xy(y: pd.Series, x: Optional[pd.Series]) -> Tuple[pd.Series, Optional[pd.Series]]:
+    """
+    Rimuove coppie X/Y non valide (NaN) per evitare trace vuote.
+    Non modifica le serie originali, ritorna viste filtrate.
+    """
+    if x is not None:
+        mask = y.notna() & x.notna()
+    else:
+        mask = y.notna()
+    if not mask.any():
+        empty_y = y.iloc[0:0]
+        empty_x = x.iloc[0:0] if isinstance(x, pd.Series) else None
+        return empty_y, empty_x
+    return y.loc[mask], x.loc[mask] if x is not None else None
+
+
 def _plot_xy(x: Optional[pd.Series], y: pd.Series, name: str) -> go.Figure:
     fig = go.Figure()
     if x is not None and x.notna().any():
@@ -1463,11 +1479,11 @@ def main():
                 horizontal=True,
                 disabled=not fft_available,
             )
-        detrend = st.checkbox(
-            "Detrend (togli media)",
-            value=preset_detrend,
-            disabled=not fft_available,
-        )
+            detrend = st.checkbox(
+                "Detrend (togli media)",
+                value=preset_detrend,
+                disabled=not fft_available,
+            )
 
         submitted = st.form_submit_button("Applica / Plot")
 
@@ -1748,6 +1764,11 @@ def main():
             x_sel = x_data.loc[reuse_index] if x_data is not None else None
             return x_sel, y_sel, None
 
+        # Drop coppie X/Y non valide per evitare linee invisibili
+        y_data, x_data = _mask_xy(y_data, x_data)
+        if y_data.empty:
+            return x_data, y_data, None
+
         # FIX ISSUE #50: Se DF già pre-decimato, salta downsampling per-series
         if df_downsampled:
             return x_data, y_data, downsampled_metadata
@@ -1814,6 +1835,9 @@ def main():
 
             name_main = yname + (" (filtrato)" if (fspec.enabled and not overlay_orig) else "")
             x_main, y_main, main_meta = _prepare_plot_series(name_main, y_plot, x_ser)
+            if y_main.empty:
+                st.info(f"'{yname}': nessun dato valido dopo la rimozione dei NaN.")
+                continue
 
             # Originale tratteggiato se richiesto
             if overlay_orig and fspec.enabled and y_filt_plot is not None:
@@ -1826,25 +1850,27 @@ def main():
                     x_overlay_src,
                     reuse_index=reuse_idx,
                 )
-                combined.add_trace(
-                    go.Scatter(
-                        x=(x_overlay if x_overlay is not None else None),
-                        y=y_overlay,
-                        mode="lines",
+                if not y_overlay.empty:
+                    combined.add_trace(
+                        go.Scatter(
+                            x=(x_overlay if x_overlay is not None else None),
+                            y=y_overlay,
+                            mode="lines",
                         name=_legend_label(overlay_label, overlay_meta or main_meta),
                         line=dict(width=1, dash="dot"),
                     )
                 )
 
             # Traccia principale (filtrato o originale)
-            combined.add_trace(
-                go.Scatter(
-                    x=(x_main if x_main is not None else None),
-                    y=y_main,
-                    mode="lines",
-                    name=_legend_label(name_main, main_meta),
+            if not y_main.empty:
+                combined.add_trace(
+                    go.Scatter(
+                        x=(x_main if x_main is not None else None),
+                        y=y_main,
+                        mode="lines",
+                        name=_legend_label(name_main, main_meta),
+                    )
                 )
-            )
             if overlay_orig and fspec.enabled and y_filt_plot is not None:
                 combined.data = combined.data[::-1]
 
@@ -1929,29 +1955,31 @@ def main():
             if fspec.enabled and not ok:
                 host.warning(f"Filtro non applicato a {yname}: {msg}")
                 y_plot = series
-            else:
-                if fspec.enabled:
-                    y_filt_full = _apply_filter_cached(
-                        series_full,
-                        x_full,
-                        fspec,
-                        fs_value,
-                        fs_info.source,
-                        file_sig,
-                        yname,
-                        fill_stamp,
-                    )
-                    if y_filt_full is None:
-                        host.warning(f"Filtro non applicato a {yname}: errore nel calcolo.")
-                        y_plot = series
-                    else:
-                        y_filt_plot = y_filt_full.reindex(series.index)
-                        y_plot = y_filt_plot
-                else:
+            elif fspec.enabled:
+                y_filt_full = _apply_filter_cached(
+                    series_full,
+                    x_full,
+                    fspec,
+                    fs_value,
+                    fs_info.source,
+                    file_sig,
+                    yname,
+                    fill_stamp,
+                )
+                if y_filt_full is None:
+                    host.warning(f"Filtro non applicato a {yname}: errore nel calcolo.")
                     y_plot = series
+                else:
+                    y_filt_plot = y_filt_full.reindex(series.index)
+                    y_plot = y_filt_plot
+            else:
+                y_plot = series
 
             display_name = yname + (" (filtrato)" if (fspec.enabled and not overlay_orig) else "")
             x_plot, y_plot_ds, main_meta = _prepare_plot_series(display_name, y_plot, x_ser)
+            if y_plot_ds.empty:
+                host.info(f"'{yname}': nessun dato valido dopo la rimozione dei NaN.")
+                continue
             fig = _plot_xy(x_plot, y_plot_ds, name=display_name)
             if fig.data:
                 fig.data[0].name = _legend_label(display_name, main_meta)
@@ -1969,16 +1997,17 @@ def main():
                     x_overlay_src,
                     reuse_index=reuse_idx,
                 )
-                fig.add_trace(
-                    go.Scatter(
-                        x=x_overlay if x_overlay is not None else None,
-                        y=y_overlay,
-                        mode="lines",
-                        name=_legend_label(overlay_label, overlay_meta or main_meta),
-                        line=dict(width=1, dash="dot"),
+                if not y_overlay.empty:
+                    fig.add_trace(
+                        go.Scatter(
+                            x=x_overlay if x_overlay is not None else None,
+                            y=y_overlay,
+                            mode="lines",
+                            name=_legend_label(overlay_label, overlay_meta or main_meta),
+                            line=dict(width=1, dash="dot"),
+                        )
                     )
-                )
-                fig.data = fig.data[::-1]
+                    fig.data = fig.data[::-1]
             _plotly_chart(host, fig)
 
             # FFT per singola serie
