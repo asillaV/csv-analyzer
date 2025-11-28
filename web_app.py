@@ -20,7 +20,6 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from core.analyzer import analyze_csv
-from core.loader import load_csv, optimize_dtypes
 from core.csv_cleaner import CleaningReport
 
 # Import condizionale: usa loader ottimizzato se configurato
