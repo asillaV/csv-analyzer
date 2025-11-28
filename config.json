@@ -25,6 +25,6 @@
     "max_file_mb": 4096,
     "max_rows": 1000000,
     "max_cols": 5000,
-    "parse_timeout_s": 240
+    "parse_timeout_s": 2400
   }
 }
