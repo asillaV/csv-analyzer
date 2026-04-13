@@ -67,7 +67,7 @@ tests_csv/
 .coverage
 *.cover
 .hypothesis/
-
+Dockerfile
 # ===== Claude =====
 .claude/
 CODE_REVIEW_REPORT.md

@@ -83,8 +83,11 @@ pytest -m integration -v
 - Mixed numeric tokens (`11_mixed_tokens.csv`)
 - Currency symbols (`12_currency_euro.csv`)
 
+<<<<<<< HEAD
+=======
 **CI/CD:** Tests run automatically on GitHub Actions (Python 3.10-3.12, Ubuntu/Windows).
 
+>>>>>>> 4b0004012f7119fd87aa9e87183af428067b9ce9
 ## Architecture
 
 ### Core Components (`core/` directory)
@@ -105,11 +108,25 @@ The application follows a modular architecture with separation between data proc
    - Vectorized pandas operations for performance (critical for large CSVs)
    - Returns `CleaningReport` with per-column conversion statistics
 
+<<<<<<< HEAD
 3. **`loader.py`** - `load_csv()` function orchestrates the pipeline:
    - Uses metadata from `analyzer.py`
    - Applies cleaning via `csv_cleaner.py`
    - Returns cleaned DataFrame with optional detailed report
    - Supports custom decimal/thousands override
+=======
+3. **`loader.py` / `loader_optimized.py`** - CSV loading with automatic optimization:
+   - **`loader.py`**: Legacy loader for small files (< 50 MB)
+   - **`loader_optimized.py`**: Optimized loader with chunked reading for large files
+   - Auto-detection of optimal loading strategy based on file size/rows
+   - **Chunked loading**: Reduces RAM peak by 45% for large files (500k rows: 1.6 GB → 890 MB)
+   - **Stratified sampling**: Fast preview of large files without full load
+   - Progress callback support for UI integration
+   - Uses metadata from `analyzer.py` and cleaning from `csv_cleaner.py`
+   - Returns cleaned DataFrame with optional detailed report
+   - Supports custom decimal/thousands override
+   - **Thresholds**: Files > 50 MB or > 100k rows use chunked loader
+>>>>>>> 4b0004012f7119fd87aa9e87183af428067b9ce9
 
 #### Signal Processing (`signal_tools.py`)
 
@@ -146,6 +163,8 @@ This design prevents:
 - Supports detrending and windowing (Hann/others via SciPy)
 - Returns (frequencies, amplitudes) or empty arrays if invalid
 
+<<<<<<< HEAD
+=======
 #### Data Quality (`quality.py`)
 
 **Non-blocking quality checks** that provide warnings without interrupting workflow:
@@ -197,6 +216,7 @@ This design prevents:
 - **Output**: Saves HTML to `outputs/` and optionally opens in browser
 - Used by TUI and desktop apps; web app has its own integrated plotting
 
+>>>>>>> 4b0004012f7119fd87aa9e87183af428067b9ce9
 #### Reporting
 
 - **`report_manager.py`** - `ReportManager` generates statistical reports:
@@ -219,6 +239,11 @@ Three independent UIs share the same core logic:
 1. **`web_app.py`** (Streamlit) - Most feature-rich:
    - Advanced panel for fs override, filters, FFT
    - Three plot modes: overlaid, separate tabs, cascade
+<<<<<<< HEAD
+   - Visual report generation with per-plot customization
+   - File upload with sample CSV loading
+   - Caching for performance (important: uses file hash + cleaning flag as cache key)
+=======
    - **Preset system**: Save/load analysis configurations
    - **Data quality checks**: Displays warnings for monotonicity, gaps, spikes
    - **Performance mode**: Auto-enables LTTB downsampling for datasets > 100k rows
@@ -227,6 +252,7 @@ Three independent UIs share the same core logic:
    - File upload with sample CSV loading
    - Caching for performance (uses file hash + cleaning flag + optimization settings as cache key)
    - Configurable limits via `config.json` (max file size, rows, columns, timeout)
+>>>>>>> 4b0004012f7119fd87aa9e87183af428067b9ce9
 
 2. **`ui/desktop_app.py`** (Tkinter):
    - Classic desktop interface
@@ -239,6 +265,8 @@ Three independent UIs share the same core logic:
    - Checkbox-based Y column selection
    - HTML plot preview in browser
 
+<<<<<<< HEAD
+=======
 ### Configuration (`config.json`)
 
 The application reads configuration from `config.json` in the project root:
@@ -266,20 +294,32 @@ The application reads configuration from `config.json` in the project root:
 
 **Used by:** `web_app.py` (limits enforcement), `quality.py` (check thresholds), `loader.py` (optimization settings)
 
+>>>>>>> 4b0004012f7119fd87aa9e87183af428067b9ce9
 ### Key Design Patterns
 
 **Performance Considerations:**
 - `csv_cleaner.py` uses vectorized pandas operations (NOT row-by-row iteration)
 - Caching in `web_app.py` prevents re-parsing on parameter changes
 - Large CSV handling via `MAX_SAMPLE_VALUES` limit in format detection
+<<<<<<< HEAD
+=======
+- **Chunked CSV loading** (`loader_optimized.py`): Reduces RAM peak by 45% for large files
+  - Files < 50 MB: standard loader (legacy, fastest for small files)
+  - Files > 50 MB or > 100k rows: chunked loader (lower memory footprint)
+  - Benchmark: 500k rows file uses 890 MB RAM vs 1.6 GB with standard loader
+- **Stratified sampling**: Fast preview of large files without loading all data
 - **LTTB downsampling**: Renders 10k points instead of full dataset for large files (>100k rows)
 - **dtype optimization**: Automatically downcasts numeric types to reduce memory (int64→int32, float64→float32)
+- **Progress tracking**: UI callbacks for long-running operations
 - **Multiprocessing**: Optional for time-consuming operations (configurable per-UI)
+>>>>>>> 4b0004012f7119fd87aa9e87183af428067b9ce9
 
 **Error Handling Philosophy:**
 - Validation functions return `(bool, message)` tuples for UI display
 - Filter/FFT functions raise `ValueError` with human-readable messages
 - UIs catch exceptions and show warnings/errors without crashing
+<<<<<<< HEAD
+=======
 - Quality checks are non-blocking: display warnings but continue workflow
 
 **Security Considerations:**
@@ -287,6 +327,7 @@ The application reads configuration from `config.json` in the project root:
 - File size limits prevent memory exhaustion attacks
 - Parse timeout prevents DoS via malformed CSVs
 - No arbitrary code execution (JSON-only config files)
+>>>>>>> 4b0004012f7119fd87aa9e87183af428067b9ce9
 
 **Conditional Dependencies:**
 - SciPy: optional, Butterworth filters disabled if missing
@@ -330,6 +371,8 @@ f"vis_report_ylabel::{column_name}"
 ```
 When columns are deselected, their state is purged to prevent stale data.
 
+<<<<<<< HEAD
+=======
 ### Preset System Workflow
 When working with presets for reproducible analyses:
 1. **Creating a preset**: Collect `FilterSpec`, `FFTSpec`, and `manual_fs` from UI
@@ -357,6 +400,7 @@ Quality checks are performed after CSV loading and displayed as expandable warni
    - Display soft recommendations (e.g., "irregular sampling may affect FFT")
 4. **Never block workflow**: Users can proceed with analysis even with quality warnings
 
+>>>>>>> 4b0004012f7119fd87aa9e87183af428067b9ce9
 ## Output Structure
 
 ```
@@ -370,6 +414,10 @@ outputs/
 logs/
   analizzatore_YYYYMMDD.log
 
+<<<<<<< HEAD
+tests_csv/
+  *.csv               # Test cases covering edge cases
+=======
 presets/
   *.json              # Saved analysis configurations (FilterSpec + FFTSpec + fs)
 
@@ -390,6 +438,7 @@ patches/
 
 scripts/
   csv_spawner.py      # Generate synthetic CSV test files
+>>>>>>> 4b0004012f7119fd87aa9e87183af428067b9ce9
 ```
 
 ## Common Gotchas
@@ -408,6 +457,8 @@ scripts/
 
 7. **CSV encoding edge cases**: BOM detection handles UTF-16 LE/BE and UTF-8-sig. Always use detected encoding when reading with pandas.
 
+<<<<<<< HEAD
+=======
 8. **Downsampling vs. processing**: LTTB/minmax downsampling is for rendering only. Filters and FFT must always operate on the original, full-resolution data before any downsampling.
 
 9. **Quality checks are non-blocking**: `run_quality_checks()` returns warnings but never raises exceptions. Display the warnings to users but allow them to continue their workflow.
@@ -422,11 +473,16 @@ scripts/
 
 14. **Preset name conflicts**: `preset_exists()` checks before saving. If overwriting an existing preset, either delete first with `delete_preset()` or handle the overwrite in UI logic.
 
+15. **Chunked loader vs legacy loader**: `loader_optimized.py` auto-selects strategy based on file size. Use `use_optimization=False` to force legacy loader for debugging. Files < 50 MB use legacy loader by default (faster for small files).
+
+>>>>>>> 4b0004012f7119fd87aa9e87183af428067b9ce9
 ## Dependencies
 
 Core scientific: pandas ≥2.2, numpy ≥1.26, plotly[kaleido] ≥5.22, scipy ≥1.12
 UI: streamlit ≥1.32, textual 0.89-0.90, rich ≥13.9
 Optional: kaleido ≥0.2.1 (PNG/PDF export)
+<<<<<<< HEAD
+=======
 Testing: pytest ≥7.0, pytest-cov (for coverage reports)
 
 ## Additional Documentation
@@ -436,6 +492,7 @@ The repository includes several specialized documentation files:
 - **`README.md`** - Main project documentation with features, screenshots, and quick start
 - **`CACHE_IMPLEMENTATION.md`** - Deep dive into Streamlit caching strategy and file signature system
 - **`PERFORMANCE_OPTIMIZATION_REPORT.md`** - Performance improvements, benchmarks, and optimization strategies
+- **`docs/OTTIMIZZAZIONE_CARICAMENTO_CSV.md`** - CSV loading optimization guide (chunked loading, sampling, benchmarks)
 - **`FIX_FFT_CHECKBOX.md`** - Technical notes on FFT checkbox state management issue
 - **`PIANO_OTTIMIZZAZIONE_CSV.md`** - Italian: CSV parsing optimization plan
 - **`PIANO_OTTIMIZZAZIONE_SICUREZZA.md`** - Italian: Security optimization and hardening plan
@@ -447,3 +504,4 @@ Consult these files when working on:
 - Cache debugging: `CACHE_IMPLEMENTATION.md`
 - Adding tests: `tests/README.md`
 - Security hardening: `PIANO_OTTIMIZZAZIONE_SICUREZZA.md`
+>>>>>>> 4b0004012f7119fd87aa9e87183af428067b9ce9

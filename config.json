@@ -7,12 +7,24 @@
   },
   "performance": {
     "optimize_dtypes": true,
-    "aggressive_dtype_optimization": false
+    "aggressive_dtype_optimization": false,
+    "use_optimized_loader": true,
+    "chunked_loading_threshold_mb": 800,
+    "rows_threshold": 100000,
+    "chunk_size": 200000,
+    "sample_size": 50000,
+    "advanced": {
+      "use_pyarrow": true,
+      "parallel_cleaning": true,
+      "early_stop_format_detection": true,
+      "skip_nonnumeric_cleaning": true,
+      "max_workers": null
+    }
   },
   "limits": {
-    "max_file_mb": 200,
+    "max_file_mb": 4096,
     "max_rows": 1000000,
-    "max_cols": 500,
-    "parse_timeout_s": 120
+    "max_cols": 5000,
+    "parse_timeout_s": 2400
   }
 }
