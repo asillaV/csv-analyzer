@@ -71,3 +71,15 @@ Dockerfile
 # ===== Claude =====
 .claude/
 CODE_REVIEW_REPORT.md
+CLAUDE.md
+# ===== Benchmark & performance artifacts =====
+baseline_performance.txt
+optimized_performance.txt
+benchmark_loading.py
+benchmark_optimized.py
+benchmark_ultra_fast.py
+
+# ===== Standalone test scripts (root) =====
+test_config_loader.py
+test_correctness.py
+test_reset_functionality.md
