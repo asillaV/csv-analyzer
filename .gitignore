@@ -71,7 +71,7 @@ Dockerfile
 # ===== Claude =====
 .claude/
 CODE_REVIEW_REPORT.md
-
+CLAUDE.md
 # ===== Benchmark & performance artifacts =====
 baseline_performance.txt
 optimized_performance.txt
