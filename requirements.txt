@@ -5,7 +5,5 @@ plotly[kaleido]>=5.22
 kaleido>=0.2.1
 scipy>=1.12
 
-# === UI & terminal interface ===
+# === Web interface ===
 streamlit>=1.32
-textual>=0.89,<0.91
-rich>=13.9

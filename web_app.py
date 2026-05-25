@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import concurrent.futures
 import hashlib
 import html
 import inspect
@@ -187,8 +188,58 @@ def _parsing_worker(result_queue: "mp.Queue", file_path: str, apply_cleaning: bo
         result_queue.put(("error", exc))
 
 
+def _parse_csv_in_thread(file_bytes: bytes, apply_cleaning: bool) -> Tuple[pd.DataFrame, CleaningReport, Dict[str, Any]]:
+    """Parsing CSV nel thread corrente — nessun subprocess spawn, zero overhead fisso."""
+    fd, tmp_name = tempfile.mkstemp(prefix="csv_upload_", suffix=".csv")
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as tmp_file:
+            tmp_file.write(file_bytes)
+        meta = analyze_csv(str(tmp_path))
+        df, cleaning_report = load_csv(
+            str(tmp_path),
+            encoding=meta.get("encoding"),
+            delimiter=meta.get("delimiter"),
+            header=meta.get("header"),
+            apply_cleaning=apply_cleaning,
+            return_details=True,
+        )
+        return df, cleaning_report, dict(meta)
+    finally:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+# File < soglia: usa threading (zero spawn overhead, compatibile con container cloud).
+# File > soglia: usa subprocess per memory isolation e kill reale in caso di OOM.
+# 200 MB copre tutti i file caricabili su Streamlit Cloud (max 200 MB upload),
+# garantendo che il subprocess spawn non venga mai invocato in ambiente cloud.
+_THREADING_SIZE_THRESHOLD = 200 * 1024 * 1024  # 200 MB
+
+# Rilevamento ambiente Streamlit Cloud (impostare IS_STREAMLIT_CLOUD=true nelle env vars del deploy)
+_IS_STREAMLIT_CLOUD = bool(
+    os.environ.get("STREAMLIT_SHARING_MODE") or os.environ.get("IS_STREAMLIT_CLOUD")
+)
+
+
 def _parse_csv_with_timeout(file_bytes: bytes, apply_cleaning: bool, timeout_s: float) -> Tuple[pd.DataFrame, CleaningReport, Dict[str, Any]]:
-    """Esegue analyze + load in un processo separato e applica un timeout."""
+    """Esegue analyze + load con timeout. Per file piccoli usa threading (no spawn overhead)."""
+
+    if len(file_bytes) <= _THREADING_SIZE_THRESHOLD:
+        # Fast path: thread nello stesso processo — nessun avvio interprete Python esterno.
+        # Su Windows spawn=2-10s di overhead fisso; threading lo elimina completamente.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_parse_csv_in_thread, file_bytes, apply_cleaning)
+            try:
+                return future.result(timeout=timeout_s)
+            except concurrent.futures.TimeoutError:
+                raise TimeoutError(
+                    f"Parsing del CSV oltre il tempo massimo di {timeout_s:.0f}s."
+                ) from None
+
+    # Slow path: subprocess per file grandi (memory isolation + kill reale se OOM).
     ctx = mp.get_context("spawn")
     result_queue: mp.Queue = ctx.Queue()
     fd, tmp_name = tempfile.mkstemp(prefix="csv_upload_", suffix=".csv")
@@ -233,6 +284,7 @@ SAMPLE_CSV_PATH = Path("assets/sample_timeseries.csv")
 # Cache limits
 MAX_FILTER_CACHE_SIZE = 32
 MAX_FFT_CACHE_SIZE = 16
+MAX_QUALITY_CACHE_SIZE = 4
 
 # FIX ISSUE #55: Cache telemetry per monitoraggio hit/miss rate
 CACHE_STATS = {
@@ -284,6 +336,8 @@ def _init_result_caches() -> None:
         st.session_state["_filter_cache"] = {}
     if "_fft_cache" not in st.session_state:
         st.session_state["_fft_cache"] = {}
+    if "_quality_cache" not in st.session_state:
+        st.session_state["_quality_cache"] = {}
 
 
 def _get_filter_cache_key(
@@ -358,9 +412,10 @@ def _cache_fft_result(key: Tuple, freqs: np.ndarray, amp: np.ndarray) -> None:
 
 
 def _invalidate_result_caches() -> None:
-    """Clear all filter and FFT caches (called on file change)."""
+    """Clear all filter, FFT and quality caches (called on file change)."""
     st.session_state.pop("_filter_cache", None)
     st.session_state.pop("_fft_cache", None)
+    st.session_state.pop("_quality_cache", None)
 
 
 def _apply_filter_cached(
@@ -1294,25 +1349,34 @@ def main():
     else:
         st.success("File caricato.")
 
-    # Run quality checks
+    # Run quality checks (with cache: avoids O(n×cols) ricalcolo ad ogni rerender)
+    _init_result_caches()
     quality_config = _load_quality_config()
     try:
-        # Get all columns for Y checks (use all cols if available)
         all_cols = list(df.columns)
-        quality_report = run_quality_checks(
-            df=df,
-            x_col=None,  # Will use index, X column will be selected later by user
-            y_cols=all_cols,  # Check all columns for spikes
-            gap_factor_k=quality_config['gap_factor_k'],
-            spike_z=quality_config['spike_z'],
-            min_points=quality_config['min_points'],
-            max_examples=quality_config['max_examples']
+        _quality_key = (
+            file_sig,
+            tuple(all_cols),
+            (quality_config['gap_factor_k'], quality_config['spike_z'], quality_config['min_points']),
         )
-        # Log summary (usa import globale, non locale)
-        quality_logger = LogManager(component="quality").get_logger()
-        quality_logger.info(quality_report.get_summary())
+        quality_report = st.session_state["_quality_cache"].get(_quality_key)
+        if quality_report is None:
+            quality_report = run_quality_checks(
+                df=df,
+                x_col=None,
+                y_cols=all_cols,
+                gap_factor_k=quality_config['gap_factor_k'],
+                spike_z=quality_config['spike_z'],
+                min_points=quality_config['min_points'],
+                max_examples=quality_config['max_examples']
+            )
+            _qcache = st.session_state["_quality_cache"]
+            if len(_qcache) >= MAX_QUALITY_CACHE_SIZE:
+                _qcache.pop(next(iter(_qcache)))
+            _qcache[_quality_key] = quality_report
+            quality_logger = LogManager(component="quality").get_logger()
+            quality_logger.info(quality_report.get_summary())
 
-        # Render badge and details
         _render_quality_badge_and_details(quality_report)
     except Exception as e:
         st.warning(f"Impossibile eseguire controlli qualità: {e}")
@@ -1382,10 +1446,11 @@ def main():
     else:
         st.session_state.setdefault(quality_key, default_quality)
 
-    # Reset forward fill su nuovo file per evitare stati appiccicosi
+    # Reset forward fill e interpolazione X su nuovo file per evitare stati appiccicosi
     if st.session_state.get("_fill_file_sig") != file_sig:
         st.session_state["_fill_file_sig"] = file_sig
         st.session_state["fillna_forward"] = False
+        st.session_state["interpolate_x_col"] = False
         st.session_state["_fill_last_stamp"] = False
 
     # Pulsante Reset impostazioni (non rimuove il file caricato)
@@ -1468,6 +1533,15 @@ def main():
             "Riempimento valori mancanti (forward fill)",
             key="fillna_forward",
             help="Applica un forward fill alle colonne per colmare eventuali NaN.",
+        )
+        interpolate_x = st.checkbox(
+            "Interpola asse X (marker spaziale sparso)",
+            key="interpolate_x_col",
+            help=(
+                "Se la colonna X è un marker di posizione aggiornato raramente (es. ogni 250 mm), "
+                "i valori NaN intermedi vengono riempiti con interpolazione lineare invece di forward fill. "
+                "Elimina gli artefatti verticali nel grafico causati da più campioni con lo stesso X."
+            ),
         )
         y_cols = st.multiselect("Colonne Y", options=cols)
         mode = st.radio("Modalità grafico", ["Sovrapposto", "Separati", "Cascata"], horizontal=True, index=0)
@@ -1552,8 +1626,8 @@ def main():
 
         submitted = st.form_submit_button("Applica / Plot")
 
-    fill_stamp = bool(fill_missing)
-    # Se il flag cambia, invalida cache filter/FFT per evitare grafici stantii
+    fill_stamp = (bool(fill_missing), bool(interpolate_x))
+    # Se i flag cambiano, invalida cache filter/FFT per evitare grafici stantii
     prev_fill = st.session_state.get("_fill_last_stamp", fill_stamp)
     if prev_fill != fill_stamp:
         _invalidate_result_caches()
@@ -1562,6 +1636,11 @@ def main():
     # ---- PRESET CONFIGURAZIONI (FUORI DAL FORM) ----
     with st.expander("Preset Configurazioni", expanded=False):
         st.markdown("Salva e riutilizza configurazioni filtri/FFT frequenti.")
+        if _IS_STREAMLIT_CLOUD:
+            st.info(
+                "Su Streamlit Cloud i preset personalizzati vengono persi al riavvio dell'app. "
+                "I preset predefiniti vengono ricreati automaticamente ad ogni avvio."
+            )
 
         # Lista preset disponibili
         try:
@@ -1642,6 +1721,26 @@ def main():
         st.warning("Seleziona almeno una colonna Y.")
         return
 
+    x_name = x_col if (x_col and x_col != "—") else None
+
+    # Interpolazione X: va applicata PRIMA del ffill globale altrimenti ffill
+    # riempie i NaN della colonna X e l'interpolazione non trova più valori da interpolare.
+    if interpolate_x and x_name and x_name in df.columns:
+        x_nan_mask = df[x_name].isna()
+        n_nan_x = int(x_nan_mask.sum())
+        if n_nan_x > 0:
+            # method='index' usa l'indice intero come asse di interpolazione
+            # → interpolazione lineare tra valori noti, proporzionale al n. di righe
+            df[x_name] = df[x_name].interpolate(method="index")
+            n_residui = int(df[x_name].isna().sum())
+            msg = f"Interpolazione X '{x_name}': {n_nan_x:,} valori interpolati linearmente"
+            if n_residui > 0:
+                msg += f"; {n_residui:,} NaN residui (testa/coda senza riferimento)"
+            msg += "."
+            st.caption(msg)
+        else:
+            st.caption(f"Interpolazione X '{x_name}': nessun NaN da interpolare.")
+
     if fill_missing:
         nan_before = int(df.isna().sum().sum())
         df = df.ffill()
@@ -1650,8 +1749,6 @@ def main():
         st.caption(
             f"Forward fill attivo: {filled_cells:,} celle riempite; NaN residui: {nan_after:,}."
         )
-
-    x_name = x_col if (x_col and x_col != "—") else None
     x_values = None
     if x_name and x_name in df.columns:
         # cerco di mantenere il tipo più utile possibile
