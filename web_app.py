@@ -50,6 +50,13 @@ from core.signal_tools import (
     apply_filter,
     compute_fft,
 )
+from core.signal_transforms import (
+    TransformSpec,
+    TRANSFORM_LABELS,
+    apply_transform_pipeline,
+    validate_transform_spec,
+    transform_spec_cache_key,
+)
 from core.quality import run_quality_checks, DataQualityReport
 from core.preset_manager import (
     save_preset,
@@ -85,6 +92,8 @@ RESETTABLE_KEYS = {
     "f_hi",
     "overlay_orig",
     # Note: enable_fft, fft_use, detrend removed: widgets have no key, reset automatically with form nonce
+    # Trasformazioni
+    "_n_transforms",
     # Report testuale
     "report_format",
     "report_base_name",
@@ -338,6 +347,8 @@ def _init_result_caches() -> None:
         st.session_state["_fft_cache"] = {}
     if "_quality_cache" not in st.session_state:
         st.session_state["_quality_cache"] = {}
+    if "_transform_cache" not in st.session_state:
+        st.session_state["_transform_cache"] = {}
 
 
 def _get_filter_cache_key(
@@ -412,10 +423,11 @@ def _cache_fft_result(key: Tuple, freqs: np.ndarray, amp: np.ndarray) -> None:
 
 
 def _invalidate_result_caches() -> None:
-    """Clear all filter, FFT and quality caches (called on file change)."""
+    """Clear all filter, FFT, transform and quality caches (called on file change)."""
     st.session_state.pop("_filter_cache", None)
     st.session_state.pop("_fft_cache", None)
     st.session_state.pop("_quality_cache", None)
+    st.session_state.pop("_transform_cache", None)
 
 
 def _apply_filter_cached(
@@ -449,6 +461,44 @@ def _apply_filter_cached(
         return filtered
     except Exception:
         return None
+
+
+MAX_TRANSFORM_CACHE_SIZE = 32
+
+
+def _apply_transform_pipeline_cached(
+    series: pd.Series,
+    x_series: Optional[pd.Series],
+    specs: List[TransformSpec],
+    fs_info: Any,
+    file_sig: FileSignature,
+    column_name: str,
+    fill_stamp: bool,
+) -> Tuple[pd.Series, Optional[pd.Series], List[str], bool]:
+    """Apply transform pipeline with caching. Returns (y, x, descriptions, changed_length)."""
+    _init_result_caches()
+    specs_key = tuple(transform_spec_cache_key(s) for s in specs)
+    fs_val = fs_info.value if fs_info else None
+    fs_src = fs_info.source if fs_info else None
+    cache_key = (column_name, file_sig, specs_key, fs_val, fs_src, fill_stamp)
+
+    cache = st.session_state.setdefault("_transform_cache", {})
+    if cache_key in cache:
+        return cache[cache_key]
+
+    y_out, x_out, descs, changed = apply_transform_pipeline(
+        series, x_series, specs, fs_info, col_name=column_name
+    )
+    result: Tuple[pd.Series, Optional[pd.Series], List[str], bool] = (
+        y_out.copy(),
+        x_out.copy() if x_out is not None else None,
+        descs,
+        changed,
+    )
+    if len(cache) >= MAX_TRANSFORM_CACHE_SIZE:
+        cache.pop(next(iter(cache)))
+    cache[cache_key] = result
+    return result
 
 
 def _compute_fft_cached(
@@ -1633,6 +1683,82 @@ def main():
         _invalidate_result_caches()
         st.session_state["_fill_last_stamp"] = fill_stamp
 
+    # ---- TRASFORMAZIONI (FUORI DAL FORM) ----
+    with st.expander("Trasformazioni", expanded=False):
+        st.caption("Trasformazioni applicate al segnale prima del filtro, in sequenza.")
+        n_tr = st.session_state.get("_n_transforms", 0)
+
+        _btn1, _btn2, _ = st.columns([1, 1, 4])
+        with _btn1:
+            if st.button("+ Aggiungi", disabled=n_tr >= 5, key="tr_btn_add"):
+                st.session_state["_n_transforms"] = n_tr + 1
+                st.rerun()
+        with _btn2:
+            if st.button("Rimuovi ultima", disabled=n_tr == 0, key="tr_btn_rem"):
+                st.session_state["_n_transforms"] = max(0, n_tr - 1)
+                st.rerun()
+
+        if n_tr == 0:
+            st.caption("Nessuna trasformazione attiva. Usa '+ Aggiungi' per aggiungere un passo.")
+
+        _tr_kind_opts = list(TRANSFORM_LABELS.keys())
+
+        _last_y_cols = st.session_state.get("_last_y_cols", [])
+
+        for _i in range(n_tr):
+            st.markdown(f"**Passo {_i + 1}**")
+            _tc1, _tc2, _tc3 = st.columns([2, 1.5, 1.5])
+            with _tc1:
+                _kind = st.selectbox(
+                    "Tipo",
+                    options=_tr_kind_opts,
+                    format_func=lambda k: TRANSFORM_LABELS[k],
+                    key=f"tr_{_i}_kind",
+                    label_visibility="collapsed",
+                )
+            with _tc2:
+                if _kind == "offset":
+                    st.number_input("Valore offset", value=0.0, step=0.1,
+                                    key=f"tr_{_i}_val", label_visibility="collapsed")
+                elif _kind == "scale":
+                    st.number_input("Fattore moltiplicativo", value=1.0, step=0.1,
+                                    key=f"tr_{_i}_val", label_visibility="collapsed")
+                elif _kind == "shift_samples":
+                    st.number_input("Campioni (intero)", value=0, step=1,
+                                    key=f"tr_{_i}_val", label_visibility="collapsed")
+                elif _kind == "shift_time":
+                    st.number_input("Δt (unità asse X)", value=0.0, step=0.1,
+                                    key=f"tr_{_i}_val", label_visibility="collapsed")
+                elif _kind == "resample":
+                    st.number_input("Target fs (Hz)", value=100.0, min_value=0.01, step=1.0,
+                                    key=f"tr_{_i}_val", label_visibility="collapsed")
+                else:
+                    st.caption("—")
+            with _tc3:
+                if _kind == "resample":
+                    st.selectbox("Metodo interpolazione",
+                                 options=["linear", "cubic", "nearest"],
+                                 key=f"tr_{_i}_method",
+                                 label_visibility="collapsed")
+                else:
+                    st.empty()
+
+            # Selettore colonne target: "Tutti" o subset
+            if _last_y_cols:
+                _apply_all = st.checkbox(
+                    "Applica a tutti i segnali",
+                    value=bool(st.session_state.get(f"tr_{_i}_all_cols", True)),
+                    key=f"tr_{_i}_all_cols",
+                )
+                if not _apply_all:
+                    st.multiselect(
+                        "Segnali target",
+                        options=_last_y_cols,
+                        default=_last_y_cols,
+                        key=f"tr_{_i}_target_cols",
+                        help="Seleziona i segnali a cui applicare questo passo.",
+                    )
+
     # ---- PRESET CONFIGURAZIONI (FUORI DAL FORM) ----
     with st.expander("Preset Configurazioni", expanded=False):
         st.markdown("Salva e riutilizza configurazioni filtri/FFT frequenti.")
@@ -1709,6 +1835,7 @@ def main():
 
     if submitted:
         st.session_state["_plots_ready"] = True
+        st.session_state["_last_y_cols"] = y_cols  # usato dal pannello Trasformazioni
         # Pulisci il preset caricato dopo il submit per evitare che rimanga attivo
         st.session_state.pop("_loaded_preset", None)
         st.session_state.pop("_loaded_preset_name", None)
@@ -1803,6 +1930,36 @@ def main():
         ma_window=int(ma_win),
     )
     fftspec = FFTSpec(enabled=bool(enable_fft), detrend=bool(detrend), window="hann")
+
+    # Raccoglie le TransformSpec configurate nel pannello Trasformazioni
+    _n_tr = int(st.session_state.get("_n_transforms", 0))
+    transform_specs: List[TransformSpec] = []
+    transform_targets: List[set] = []  # set vuoto = tutti i segnali
+    for _ti in range(_n_tr):
+        _tkind = st.session_state.get(f"tr_{_ti}_kind", "offset")
+        _tval = st.session_state.get(f"tr_{_ti}_val")
+        _tval_f = float(_tval) if _tval is not None else 0.0
+        _tmethod = st.session_state.get(f"tr_{_ti}_method", "linear")
+        if _tkind == "offset":
+            _ts = TransformSpec(kind="offset", constant=_tval_f)
+        elif _tkind == "scale":
+            _ts = TransformSpec(kind="scale", constant=_tval_f)
+        elif _tkind == "shift_samples":
+            _ts = TransformSpec(kind="shift_samples", shift_samples=int(_tval_f))
+        elif _tkind == "shift_time":
+            _ts = TransformSpec(kind="shift_time", shift_time=_tval_f)
+        elif _tkind == "resample":
+            _ts = TransformSpec(kind="resample", target_fs=_tval_f, interp_method=_tmethod)
+        else:
+            _ts = TransformSpec(kind=_tkind)  # minmax_norm, zscore_norm, derivative, integral
+        transform_specs.append(_ts)
+        # Colonne target: set vuoto = tutti; set non vuoto = solo queste colonne
+        _tapply_all = bool(st.session_state.get(f"tr_{_ti}_all_cols", True))
+        if _tapply_all:
+            transform_targets.append(set())
+        else:
+            _tcols = st.session_state.get(f"tr_{_ti}_target_cols", [])
+            transform_targets.append(set(_tcols))
 
     # Salva preset se richiesto
     pending_save = st.session_state.get("_pending_preset_save")
@@ -1958,9 +2115,31 @@ def main():
         # ----- UNICA FIGURA CON TUTTE LE SERIE ----- #
         combined = go.Figure()
         x_label = x_name if x_name else "Index"
+        _tr_series_for_fft: Dict[str, Tuple[pd.Series, Optional[pd.Series]]] = {}
 
         for yname in y_cols:
             series_plot, x_plot, series_full, x_full = _get_series_sources(yname)
+            series_orig, x_orig = series_full, x_full  # per overlay "originale" (pre-trasformazione)
+
+            # Applica pipeline trasformazioni (prima del filtro) — solo spec applicabili a questa colonna
+            _col_specs = [s for s, t in zip(transform_specs, transform_targets) if not t or yname in t]
+            if _col_specs:
+                try:
+                    _tr_y, _tr_x, _, _tr_changed = _apply_transform_pipeline_cached(
+                        series_full, x_full, _col_specs, fs_info, file_sig, yname, fill_stamp
+                    )
+                    series_full = _tr_y
+                    x_full = _tr_x
+                    if _tr_changed:
+                        series_plot = _tr_y
+                        x_plot = _tr_x
+                    else:
+                        series_plot = _tr_y.reindex(series_plot.index)
+                        x_plot = _tr_x.reindex(x_plot.index) if _tr_x is not None and x_plot is not None else _tr_x
+                except ValueError as _e:
+                    st.warning(f"Trasformazione non applicata a '{yname}': {_e}")
+            _tr_series_for_fft[yname] = (series_full, x_full)
+
             series = series_plot
             x_ser = x_plot
             if series.dropna().empty:
@@ -2001,14 +2180,14 @@ def main():
                 st.info(f"'{yname}': nessun dato valido dopo la rimozione dei NaN.")
                 continue
 
-            # Originale tratteggiato se richiesto
+            # Originale tratteggiato se richiesto (usa serie pre-trasformazione)
             if overlay_orig and fspec.enabled and y_filt_plot is not None:
                 overlay_label = f"{yname} (originale)"
                 reuse_idx = y_main.index if main_meta and main_meta.original_count > main_meta.sampled_count else None
-                x_overlay_src = x_full if x_full is not None else x_ser
+                x_overlay_src = x_orig if x_orig is not None else x_ser
                 x_overlay, y_overlay, overlay_meta = _prepare_plot_series(
                     overlay_label,
-                    series_full,
+                    series_orig,
                     x_overlay_src,
                     reuse_index=reuse_idx,
                 )
@@ -2056,7 +2235,12 @@ def main():
             for yname in y_cols:
                 # FIX ISSUE #50: FFT usa dati ORIGINALI (non decimati), non df_plot
                 # FIX ISSUE #52: Passa X pre-parsato originale
-                series, x_ser = _make_time_series(df, x_name, yname, x_parsed=x_parsed_orig)
+                # Se trasformazioni attive, usa la serie trasformata già calcolata nel loop sopra
+                _tr_full = _tr_series_for_fft.get(yname)
+                if _tr_full is not None:
+                    series, x_ser = _tr_full
+                else:
+                    series, x_ser = _make_time_series(df, x_name, yname, x_parsed=x_parsed_orig)
                 if series.dropna().empty:
                     continue
                 y_filt = None
@@ -2102,6 +2286,26 @@ def main():
         tabs = st.tabs(y_cols)
         for idx, yname in enumerate(y_cols):
             series_plot, x_plot, series_full, x_full = _get_series_sources(yname)
+            series_orig, x_orig = series_full, x_full  # per overlay pre-trasformazione
+
+            # Applica pipeline trasformazioni (prima del filtro) — solo spec applicabili a questa colonna
+            _col_specs = [s for s, t in zip(transform_specs, transform_targets) if not t or yname in t]
+            if _col_specs:
+                try:
+                    _tr_y, _tr_x, _, _tr_changed = _apply_transform_pipeline_cached(
+                        series_full, x_full, _col_specs, fs_info, file_sig, yname, fill_stamp
+                    )
+                    series_full = _tr_y
+                    x_full = _tr_x
+                    if _tr_changed:
+                        series_plot = _tr_y
+                        x_plot = _tr_x
+                    else:
+                        series_plot = _tr_y.reindex(series_plot.index)
+                        x_plot = _tr_x.reindex(x_plot.index) if _tr_x is not None and x_plot is not None else _tr_x
+                except ValueError as _e:
+                    tabs[idx].warning(f"Trasformazione non applicata a '{yname}': {_e}")
+
             series = series_plot
             x_ser = x_plot
             host = tabs[idx]
@@ -2152,10 +2356,10 @@ def main():
             if overlay_orig and fspec.enabled and y_filt_plot is not None:
                 overlay_label = f"{yname} (originale)"
                 reuse_idx = y_plot_ds.index if main_meta and main_meta.original_count > main_meta.sampled_count else None
-                x_overlay_src = x_full if x_full is not None else x_ser
+                x_overlay_src = x_orig if x_orig is not None else x_ser
                 x_overlay, y_overlay, overlay_meta = _prepare_plot_series(
                     overlay_label,
-                    series_full,
+                    series_orig,
                     x_overlay_src,
                     reuse_index=reuse_idx,
                 )
@@ -2207,6 +2411,26 @@ def main():
         # ----- CASCATA: grafici uno sotto l'altro ----- #
         for yname in y_cols:
             series_plot, x_plot, series_full, x_full = _get_series_sources(yname)
+            series_orig, x_orig = series_full, x_full  # per overlay pre-trasformazione
+
+            # Applica pipeline trasformazioni (prima del filtro) — solo spec applicabili a questa colonna
+            _col_specs = [s for s, t in zip(transform_specs, transform_targets) if not t or yname in t]
+            if _col_specs:
+                try:
+                    _tr_y, _tr_x, _, _tr_changed = _apply_transform_pipeline_cached(
+                        series_full, x_full, _col_specs, fs_info, file_sig, yname, fill_stamp
+                    )
+                    series_full = _tr_y
+                    x_full = _tr_x
+                    if _tr_changed:
+                        series_plot = _tr_y
+                        x_plot = _tr_x
+                    else:
+                        series_plot = _tr_y.reindex(series_plot.index)
+                        x_plot = _tr_x.reindex(x_plot.index) if _tr_x is not None and x_plot is not None else _tr_x
+                except ValueError as _e:
+                    st.warning(f"Trasformazione non applicata a '{yname}': {_e}")
+
             series = series_plot
             x_ser = x_plot
 
@@ -2254,10 +2478,10 @@ def main():
             if overlay_orig and fspec.enabled and y_filt_plot is not None:
                 overlay_label = f"{yname} (originale)"
                 reuse_idx = y_plot_ds.index if main_meta and main_meta.original_count > main_meta.sampled_count else None
-                x_overlay_src = x_full if x_full is not None else x_ser
+                x_overlay_src = x_orig if x_orig is not None else x_ser
                 x_overlay, y_overlay, overlay_meta = _prepare_plot_series(
                     overlay_label,
-                    series_full,
+                    series_orig,
                     x_overlay_src,
                     reuse_index=reuse_idx,
                 )
