@@ -22,7 +22,7 @@
     }
   },
   "limits": {
-    "max_file_mb": 100,
+    "max_file_mb": 200,
     "max_rows": 500000,
     "max_cols": 200,
     "parse_timeout_s": 90
