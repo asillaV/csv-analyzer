@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
-from typing import Literal, Optional, Sequence, Tuple
+from typing import Dict, Literal, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
+
+# Cache module-level per LTTB: sopravvive a tutti i rerender Streamlit nello stesso processo.
+_LTTB_CACHE: Dict[Tuple, np.ndarray] = {}
+_LTTB_CACHE_MAX = 64
 
 DownsampleMethod = Literal["lttb", "minmax", "identity"]
 
@@ -40,6 +45,26 @@ def _as_numeric_x(values: pd.Series) -> np.ndarray:
     except (TypeError, ValueError):
         cast = pd.to_numeric(values, errors="coerce")
         return cast.to_numpy(dtype=np.float64)
+
+
+def _lttb_fingerprint(x: np.ndarray, y: np.ndarray) -> str:
+    """Fingerprint veloce basato su campionamento di 100 punti. Collision rate trascurabile."""
+    n = len(y)
+    idx = np.linspace(0, n - 1, min(100, n), dtype=int)
+    fp = np.concatenate([[n, x[0], x[-1], y[0], y[-1]], x[idx], y[idx]])
+    return hashlib.md5(fp.tobytes()).hexdigest()
+
+
+def _lttb_indices_cached(x: np.ndarray, y: np.ndarray, target_count: int) -> np.ndarray:
+    """Wrapper cachato di _lttb_indices: evita ricalcolo O(n×target) su dati invariati."""
+    key = (_lttb_fingerprint(x, y), target_count)
+    if key in _LTTB_CACHE:
+        return _LTTB_CACHE[key]
+    result = _lttb_indices(x, y, target_count)
+    if len(_LTTB_CACHE) >= _LTTB_CACHE_MAX:
+        del _LTTB_CACHE[next(iter(_LTTB_CACHE))]
+    _LTTB_CACHE[key] = result
+    return result
 
 
 def _lttb_indices(x: np.ndarray, y: np.ndarray, target_count: int) -> np.ndarray:
@@ -156,7 +181,7 @@ def downsample_series(
 
     target = min(max_points, len(df))
     if method == "lttb":
-        idx_positions = _lttb_indices(work_x, work_y, target)
+        idx_positions = _lttb_indices_cached(work_x, work_y, target)
     else:
         idx_positions = _minmax_indices(work_y, target)
 
