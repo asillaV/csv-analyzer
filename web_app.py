@@ -1686,28 +1686,37 @@ def main():
     # ---- TRASFORMAZIONI (FUORI DAL FORM) ----
     with st.expander("Trasformazioni", expanded=False):
         st.caption("Trasformazioni applicate al segnale prima del filtro, in sequenza.")
-        n_tr = st.session_state.get("_n_transforms", 0)
 
-        _btn1, _btn2, _ = st.columns([1, 1, 4])
-        with _btn1:
-            if st.button("+ Aggiungi", disabled=n_tr >= 5, key="tr_btn_add"):
-                st.session_state["_n_transforms"] = n_tr + 1
-                st.rerun()
-        with _btn2:
-            if st.button("Rimuovi ultima", disabled=n_tr == 0, key="tr_btn_rem"):
-                st.session_state["_n_transforms"] = max(0, n_tr - 1)
-                st.rerun()
+        # Process a pending step-delete BEFORE any widgets are instantiated,
+        # so we can freely write to widget-bound keys.
+        _step_fields = ("kind", "val", "method", "all_cols", "target_cols")
+        _pending_del = st.session_state.pop("_pending_delete_step", None)
+        if _pending_del is not None:
+            _nd = st.session_state.get("_n_transforms", 0)
+            for _j in range(_pending_del, _nd - 1):
+                for _f in _step_fields:
+                    _src, _dst = f"tr_{_j+1}_{_f}", f"tr_{_j}_{_f}"
+                    if _src in st.session_state:
+                        st.session_state[_dst] = st.session_state[_src]
+                    elif _dst in st.session_state:
+                        del st.session_state[_dst]
+            for _f in _step_fields:
+                st.session_state.pop(f"tr_{_nd-1}_{_f}", None)
+            st.session_state["_n_transforms"] = max(0, _nd - 1)
+
+        n_tr = st.session_state.get("_n_transforms", 0)
 
         if n_tr == 0:
             st.caption("Nessuna trasformazione attiva. Usa '+ Aggiungi' per aggiungere un passo.")
 
         _tr_kind_opts = list(TRANSFORM_LABELS.keys())
-
         _last_y_cols = st.session_state.get("_last_y_cols", [])
 
+        # Loop renders ALL step widgets BEFORE any button that calls st.rerun(),
+        # so widget states are committed to session_state before the rerun fires.
         for _i in range(n_tr):
             st.markdown(f"**Passo {_i + 1}**")
-            _tc1, _tc2, _tc3 = st.columns([2, 1.5, 1.5])
+            _tc1, _tc2, _tc3, _tc4 = st.columns([2, 1.5, 1.5, 0.4])
             with _tc1:
                 _kind = st.selectbox(
                     "Tipo",
@@ -1742,22 +1751,40 @@ def main():
                                  label_visibility="collapsed")
                 else:
                     st.empty()
+            with _tc4:
+                if st.button("🗑️", key=f"tr_{_i}_del", help=f"Elimina passo {_i + 1}"):
+                    st.session_state["_pending_delete_step"] = _i
+                    st.rerun()
 
-            # Selettore colonne target: "Tutti" o subset
+            # Selettore colonne target — pre-initialize to avoid reset on rerun
             if _last_y_cols:
-                _apply_all = st.checkbox(
-                    "Applica a tutti i segnali",
-                    value=bool(st.session_state.get(f"tr_{_i}_all_cols", True)),
-                    key=f"tr_{_i}_all_cols",
-                )
+                _all_key = f"tr_{_i}_all_cols"
+                if _all_key not in st.session_state:
+                    st.session_state[_all_key] = True
+                _apply_all = st.checkbox("Applica a tutti i segnali", key=_all_key)
                 if not _apply_all:
+                    _target_key = f"tr_{_i}_target_cols"
+                    if _target_key not in st.session_state:
+                        st.session_state[_target_key] = list(_last_y_cols)
+                    else:
+                        # Drop any columns that are no longer in the current selection
+                        _valid = [v for v in st.session_state[_target_key] if v in _last_y_cols]
+                        if _valid != st.session_state[_target_key]:
+                            st.session_state[_target_key] = _valid
                     st.multiselect(
                         "Segnali target",
                         options=_last_y_cols,
-                        default=_last_y_cols,
-                        key=f"tr_{_i}_target_cols",
+                        key=_target_key,
                         help="Seleziona i segnali a cui applicare questo passo.",
                     )
+
+        # "+ Aggiungi" is placed AFTER the loop so all step widgets render first,
+        # committing their session_state values before st.rerun() is triggered.
+        _btn_col, _ = st.columns([1, 5])
+        with _btn_col:
+            if st.button("+ Aggiungi", disabled=n_tr >= 5, key="tr_btn_add"):
+                st.session_state["_n_transforms"] = n_tr + 1
+                st.rerun()
 
     # ---- PRESET CONFIGURAZIONI (FUORI DAL FORM) ----
     with st.expander("Preset Configurazioni", expanded=False):
