@@ -53,6 +53,7 @@ from core.signal_tools import (
 from core.signal_transforms import (
     TransformSpec,
     TRANSFORM_LABELS,
+    TRANSFORM_GUIDE,
     apply_transform_pipeline,
     validate_transform_spec,
     transform_spec_cache_key,
@@ -551,6 +552,12 @@ def _reset_all_settings() -> None:
     st.session_state.pop("_loaded_preset", None)
     st.session_state.pop("_loaded_preset_name", None)
     st.session_state.pop("_pending_preset_save", None)
+
+    # Reset pannello trasformazioni (passi individuali + pending action)
+    for _k in list(st.session_state.keys()):
+        if isinstance(_k, str) and _k.startswith("tr_"):
+            st.session_state.pop(_k, None)
+    st.session_state.pop("_pending_delete_step", None)
 
     st.session_state["_controls_nonce"] = st.session_state.get("_controls_nonce", 0) + 1
 
@@ -1684,24 +1691,62 @@ def main():
         st.session_state["_fill_last_stamp"] = fill_stamp
 
     # ---- TRASFORMAZIONI (FUORI DAL FORM) ----
-    with st.expander("Trasformazioni", expanded=False):
+    with st.expander(
+        "Trasformazioni",
+        expanded=st.session_state.get("_n_transforms", 0) > 0,
+    ):
         st.caption("Trasformazioni applicate al segnale prima del filtro, in sequenza.")
 
-        # Process a pending step-delete BEFORE any widgets are instantiated,
-        # so we can freely write to widget-bound keys.
-        _step_fields = ("kind", "val", "method", "all_cols", "target_cols")
+        with st.expander("ℹ️ Guida trasformazioni", expanded=False):
+            _guide_rows = []
+            for _gk, _glabel in TRANSFORM_LABELS.items():
+                _g = TRANSFORM_GUIDE[_gk]
+                _guide_rows.append({
+                    "Tipo": _glabel,
+                    "Formula": _g["formula"],
+                    "Descrizione": _g["note"],
+                    "Asse X": _g["x"],
+                    "Cambia lunghezza": _g["len"],
+                })
+            st.dataframe(
+                pd.DataFrame(_guide_rows).set_index("Tipo"),
+                use_container_width=True,
+                hide_index=False,
+            )
+            st.caption(
+                "⚠️ Le trasformazioni con 'Cambia lunghezza = Sì' (Derivata, Ricampionamento) "
+                "non possono essere incluse nel report statistico insieme alle altre colonne."
+            )
+
+        # Processa delete pendente PRIMA di qualsiasi widget, così possiamo
+        # scrivere liberamente sulle chiavi dei widget (non ancora istanziati).
+        _step_fields = (
+            "kind", "val", "method", "all_cols", "target_cols", "kind_prev", "per_col"
+        )
         _pending_del = st.session_state.pop("_pending_delete_step", None)
         if _pending_del is not None:
             _nd = st.session_state.get("_n_transforms", 0)
             for _j in range(_pending_del, _nd - 1):
+                # Shift chiavi fisse
                 for _f in _step_fields:
                     _src, _dst = f"tr_{_j+1}_{_f}", f"tr_{_j}_{_f}"
                     if _src in st.session_state:
                         st.session_state[_dst] = st.session_state[_src]
                     elif _dst in st.session_state:
                         del st.session_state[_dst]
+                # Shift chiavi override per-colonna (nomi variabili)
+                for _ok in list(st.session_state.keys()):
+                    if isinstance(_ok, str) and _ok.startswith(f"tr_{_j}_ov_"):
+                        del st.session_state[_ok]
+                for _ok in list(st.session_state.keys()):
+                    if isinstance(_ok, str) and _ok.startswith(f"tr_{_j+1}_ov_"):
+                        st.session_state[f"tr_{_j}_ov_{_ok[len(f'tr_{_j+1}_ov_'):]}"] = st.session_state[_ok]
+            # Rimuovi ultimo step
             for _f in _step_fields:
                 st.session_state.pop(f"tr_{_nd-1}_{_f}", None)
+            for _ok in list(st.session_state.keys()):
+                if isinstance(_ok, str) and _ok.startswith(f"tr_{_nd-1}_ov_"):
+                    del st.session_state[_ok]
             st.session_state["_n_transforms"] = max(0, _nd - 1)
 
         n_tr = st.session_state.get("_n_transforms", 0)
@@ -1710,10 +1755,17 @@ def main():
             st.caption("Nessuna trasformazione attiva. Usa '+ Aggiungi' per aggiungere un passo.")
 
         _tr_kind_opts = list(TRANSFORM_LABELS.keys())
-        _last_y_cols = st.session_state.get("_last_y_cols", [])
+        # Rimuovi eventuali colonne stale (da un CSV precedente non più presenti)
+        # e usa tutte le colonne disponibili come fallback se non è ancora stato eseguito il plot.
+        _last_y_cols_stored = [
+            c for c in st.session_state.get("_last_y_cols", []) if c in cols
+        ]
+        _last_y_cols = _last_y_cols_stored or [c for c in cols if c not in ("—", x_col)]
 
-        # Loop renders ALL step widgets BEFORE any button that calls st.rerun(),
-        # so widget states are committed to session_state before the rerun fires.
+        # st.rerun() viene chiamato UNA SOLA VOLTA dopo il loop completo,
+        # così tutti i widget committono il proprio stato prima del rerun.
+        _needs_rerun = False
+
         for _i in range(n_tr):
             st.markdown(f"**Passo {_i + 1}**")
             _tc1, _tc2, _tc3, _tc4 = st.columns([2, 1.5, 1.5, 0.4])
@@ -1726,21 +1778,41 @@ def main():
                     label_visibility="collapsed",
                 )
             with _tc2:
+                _val_key = f"tr_{_i}_val"
+                _kind_prev_key = f"tr_{_i}_kind_prev"
+                _prev_kind = st.session_state.get(_kind_prev_key)
+                # Reset val al default quando il tipo cambia
+                if _prev_kind is not None and _prev_kind != _kind:
+                    _defaults = {"offset": 0.0, "scale": 1.0, "shift_samples": 0,
+                                 "shift_time": 0.0, "resample": 100.0}
+                    st.session_state[_val_key] = _defaults.get(_kind, 0.0)
+                    for _ok in list(st.session_state.keys()):
+                        if isinstance(_ok, str) and _ok.startswith(f"tr_{_i}_ov_"):
+                            del st.session_state[_ok]
+                st.session_state[_kind_prev_key] = _kind
+                # Pre-inizializza val se assente
+                if _val_key not in st.session_state:
+                    _defaults = {"offset": 0.0, "scale": 1.0, "shift_samples": 0,
+                                 "shift_time": 0.0, "resample": 100.0}
+                    st.session_state[_val_key] = _defaults.get(_kind, 0.0)
+                elif _kind == "resample" and float(st.session_state[_val_key]) <= 0:
+                    st.session_state[_val_key] = 100.0
+
                 if _kind == "offset":
-                    st.number_input("Valore offset", value=0.0, step=0.1,
-                                    key=f"tr_{_i}_val", label_visibility="collapsed")
+                    st.number_input("Valore offset", step=0.1,
+                                    key=_val_key, label_visibility="collapsed")
                 elif _kind == "scale":
-                    st.number_input("Fattore moltiplicativo", value=1.0, step=0.1,
-                                    key=f"tr_{_i}_val", label_visibility="collapsed")
+                    st.number_input("Fattore moltiplicativo", step=0.1,
+                                    key=_val_key, label_visibility="collapsed")
                 elif _kind == "shift_samples":
-                    st.number_input("Campioni (intero)", value=0, step=1,
-                                    key=f"tr_{_i}_val", label_visibility="collapsed")
+                    st.number_input("Campioni (intero)", step=1,
+                                    key=_val_key, label_visibility="collapsed")
                 elif _kind == "shift_time":
-                    st.number_input("Δt (unità asse X)", value=0.0, step=0.1,
-                                    key=f"tr_{_i}_val", label_visibility="collapsed")
+                    st.number_input("Δt (unità asse X)", step=0.1,
+                                    key=_val_key, label_visibility="collapsed")
                 elif _kind == "resample":
-                    st.number_input("Target fs (Hz)", value=100.0, min_value=0.01, step=1.0,
-                                    key=f"tr_{_i}_val", label_visibility="collapsed")
+                    st.number_input("Target fs (Hz)", min_value=0.01, step=1.0,
+                                    key=_val_key, label_visibility="collapsed")
                 else:
                     st.caption("—")
             with _tc3:
@@ -1754,9 +1826,10 @@ def main():
             with _tc4:
                 if st.button("🗑️", key=f"tr_{_i}_del", help=f"Elimina passo {_i + 1}"):
                     st.session_state["_pending_delete_step"] = _i
-                    st.rerun()
+                    _needs_rerun = True
 
-            # Selettore colonne target — pre-initialize to avoid reset on rerun
+            # Selettore colonne target
+            _apply_all = True
             if _last_y_cols:
                 _all_key = f"tr_{_i}_all_cols"
                 if _all_key not in st.session_state:
@@ -1767,7 +1840,6 @@ def main():
                     if _target_key not in st.session_state:
                         st.session_state[_target_key] = list(_last_y_cols)
                     else:
-                        # Drop any columns that are no longer in the current selection
                         _valid = [v for v in st.session_state[_target_key] if v in _last_y_cols]
                         if _valid != st.session_state[_target_key]:
                             st.session_state[_target_key] = _valid
@@ -1778,13 +1850,45 @@ def main():
                         help="Seleziona i segnali a cui applicare questo passo.",
                     )
 
-        # "+ Aggiungi" is placed AFTER the loop so all step widgets render first,
-        # committing their session_state values before st.rerun() is triggered.
+            # Override per-colonna (solo per offset e scale)
+            if _kind in ("offset", "scale") and _last_y_cols:
+                _per_col_key = f"tr_{_i}_per_col"
+                if _per_col_key not in st.session_state:
+                    st.session_state[_per_col_key] = False
+                _per_col = st.checkbox(
+                    "Valori diversi per colonna",
+                    key=_per_col_key,
+                    help="Imposta un valore specifico per ogni segnale selezionato.",
+                )
+                if _per_col:
+                    _cols_for_ov = (
+                        _last_y_cols if _apply_all
+                        else st.session_state.get(f"tr_{_i}_target_cols", _last_y_cols)
+                    )
+                    _global_val = float(st.session_state.get(_val_key, 0.0))
+                    for _oc in _cols_for_ov:
+                        _ov_key = f"tr_{_i}_ov_{_oc}"
+                        if _ov_key not in st.session_state:
+                            st.session_state[_ov_key] = _global_val
+                        _oc1, _oc2 = st.columns([2, 3])
+                        with _oc1:
+                            st.caption(_oc)
+                        with _oc2:
+                            st.number_input(
+                                f"Override {_oc}",
+                                step=0.1,
+                                key=_ov_key,
+                                label_visibility="collapsed",
+                            )
+
         _btn_col, _ = st.columns([1, 5])
         with _btn_col:
             if st.button("+ Aggiungi", disabled=n_tr >= 5, key="tr_btn_add"):
                 st.session_state["_n_transforms"] = n_tr + 1
-                st.rerun()
+                _needs_rerun = True
+
+        if _needs_rerun:
+            st.rerun()
 
     # ---- PRESET CONFIGURAZIONI (FUORI DAL FORM) ----
     with st.expander("Preset Configurazioni", expanded=False):
@@ -1967,10 +2071,18 @@ def main():
         _tval = st.session_state.get(f"tr_{_ti}_val")
         _tval_f = float(_tval) if _tval is not None else 0.0
         _tmethod = st.session_state.get(f"tr_{_ti}_method", "linear")
+        _tper_col = bool(st.session_state.get(f"tr_{_ti}_per_col", False))
+        _toverrides: Dict[str, float] = {}
+        if _tper_col and _tkind in ("offset", "scale"):
+            for _tok, _tov in list(st.session_state.items()):
+                if isinstance(_tok, str) and _tok.startswith(f"tr_{_ti}_ov_"):
+                    _toverrides[_tok[len(f"tr_{_ti}_ov_"):]] = float(_tov)
         if _tkind == "offset":
-            _ts = TransformSpec(kind="offset", constant=_tval_f)
+            _ts = TransformSpec(kind="offset", constant=_tval_f,
+                                per_column=_tper_col, per_column_overrides=_toverrides)
         elif _tkind == "scale":
-            _ts = TransformSpec(kind="scale", constant=_tval_f)
+            _ts = TransformSpec(kind="scale", constant=_tval_f,
+                                per_column=_tper_col, per_column_overrides=_toverrides)
         elif _tkind == "shift_samples":
             _ts = TransformSpec(kind="shift_samples", shift_samples=int(_tval_f))
         elif _tkind == "shift_time":
@@ -2591,6 +2703,66 @@ def main():
     # ---- Report ----
     st.divider()
     st.subheader("Report statistici")
+
+    # Costruisce il DataFrame per il report: originale o con trasformazioni applicate.
+    # Le colonne per cui la trasformazione cambia la lunghezza (derivata, resample)
+    # vengono mantenute originali con un avviso.
+    _df_report = df
+    if transform_specs:
+        _rpt_use_tr = st.checkbox(
+            "Usa dati trasformati nel report",
+            value=True,
+            help="Applica le trasformazioni configurate prima di calcolare statistiche e grafici.",
+        )
+        if _rpt_use_tr:
+            _df_report = df.copy()
+            _rpt_skipped: List[str] = []
+            for _ryn in [c for c in _df_report.columns if c != x_name]:
+                _rspecs = [
+                    s for s, t in zip(transform_specs, transform_targets)
+                    if not t or _ryn in t
+                ]
+                if not _rspecs:
+                    continue
+                _rx_r = _df_report[x_name] if x_name and x_name in _df_report.columns else None
+                try:
+                    _rtr_y, _, _, _rtr_chg = _apply_transform_pipeline_cached(
+                        _df_report[_ryn], _rx_r, _rspecs, fs_info, file_sig, _ryn, fill_stamp
+                    )
+                    if _rtr_chg:
+                        _rpt_skipped.append(_ryn)
+                    else:
+                        _df_report[_ryn] = _rtr_y
+                except ValueError:
+                    _rpt_skipped.append(_ryn)
+            if _rpt_skipped:
+                st.info(
+                    "Le seguenti colonne usano i dati originali nel report "
+                    "(la trasformazione ne modifica la lunghezza del segnale): "
+                    + ", ".join(_rpt_skipped)
+                )
+
+    # Slice X: filtra _df_report allo stesso intervallo mostrato nel grafico.
+    # Usa x_values (già convertito a numerico/datetime) per costruire la maschera,
+    # così si evita il confronto dtype=str vs float sulla colonna originale.
+    if xrange is not None:
+        try:
+            if x_values is not None:
+                _xmask = (x_values >= xrange[0]) & (x_values <= xrange[1])
+            elif x_name and x_name in _df_report.columns:
+                _xf = pd.to_numeric(_df_report[x_name], errors="coerce")
+                _xmask = (_xf >= xrange[0]) & (_xf <= xrange[1])
+            else:
+                _idx_s = _df_report.index.to_series()
+                _xmask = (_idx_s >= xrange[0]) & (_idx_s <= xrange[1])
+            _df_report = _df_report.loc[_xmask.values].reset_index(drop=True)
+            st.caption(
+                f"Report calcolato sull'intervallo X [{xrange[0]}, {xrange[1]}]"
+                f" — {len(_df_report)} righe."
+            )
+        except Exception:
+            pass
+
     col_r1, col_r2 = st.columns([1, 2])
     with col_r1:
         fmt = st.selectbox(
@@ -2610,7 +2782,7 @@ def main():
             try:
                 manager = ReportManager()
                 out_paths = manager.generate_report(
-                    df, x_name, y_cols, formats=fmt, base_name=base_name or None
+                    _df_report, x_name, y_cols, formats=fmt, base_name=base_name or None
                 )
                 mime_map = {
                     "csv": "text/csv",
@@ -2737,7 +2909,7 @@ def main():
                 with st.spinner("Generazione report visivo..."):
                     manager = VisualReportManager()
                     result = manager.generate_report(
-                        df=df,
+                        df=_df_report,
                         specs=visual_specs,
                         x_column=x_name,
                         title=visual_title or "", #modifica per eliminare "udefined" su report html quando titolo vuoto

@@ -44,6 +44,18 @@ TRANSFORM_LABELS: Dict[str, str] = {
     "integral": "Integrale (∫y dx)",
 }
 
+TRANSFORM_GUIDE: Dict[str, Dict[str, str]] = {
+    "offset":        {"formula": "y = y + c",          "note": "Sposta il segnale verticalmente.",           "x": "No",  "len": "No"},
+    "scale":         {"formula": "y = y × c",          "note": "Cambia ampiezza / unità di misura.",         "x": "No",  "len": "No"},
+    "minmax_norm":   {"formula": "y → [0, 1]",         "note": "Normalizza tra 0 e 1.",                      "x": "No",  "len": "No"},
+    "zscore_norm":   {"formula": "y → μ=0, σ=1",       "note": "Centra e scala a deviazione standard 1.",    "x": "No",  "len": "No"},
+    "shift_samples": {"formula": "shift(y, N)",         "note": "Ritarda (N>0) o anticipa (N<0) il segnale.", "x": "No",  "len": "No"},
+    "shift_time":    {"formula": "x = x + Δt",         "note": "Sposta l'asse temporale.",                   "x": "Sì",  "len": "No"},
+    "resample":      {"formula": "interp(y, x, fs_new)","note": "Ricampiona a nuova frequenza.",              "x": "Sì",  "len": "Sì"},
+    "derivative":    {"formula": "dy/dx (N−1 camp.)",  "note": "Velocità / tasso di variazione.",            "x": "Sì",  "len": "Sì"},
+    "integral":      {"formula": "∫y dx (trapezi)",    "note": "Area sotto la curva cumulativa.",            "x": "Sì",  "len": "No"},
+}
+
 _X_REQUIRED: frozenset = frozenset({"shift_time", "resample", "derivative", "integral"})
 _CHANGES_LENGTH: frozenset = frozenset({"derivative", "resample"})
 
