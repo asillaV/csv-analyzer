@@ -1,0 +1,12 @@
+# Artefatti di build/runtime dello spike — non vanno versionati.
+__pycache__/
+*.py[cod]
+
+# Reflex: frontend compilato (Next.js + node_modules, ~450MB), stato, lockfile.
+**/.web/
+**/.states/
+**/reflex.lock/
+**/assets/external/
+
+# File temporanei upload
+spike_upload_*
