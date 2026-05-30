@@ -262,20 +262,17 @@ def _collect_samples(df: pd.DataFrame, max_samples: int) -> List[str]:
 
     for column in df.columns:
         if len(samples) >= max_samples:
-            break  # Esci early se abbiamo abbastanza campioni
+            break
 
         series = df[column].astype("string", copy=False)
-        # Itera solo su un subset limitato di righe per colonna
-        for value in series.head(rows_per_column):
-            if value is None or pd.isna(value):
-                continue
-            text = str(value).strip()
-            if not text:
-                continue
-            if NUMERIC_TOKEN_RE.search(text):
-                samples.append(text)
-            if len(samples) >= max_samples:
-                return samples
+        head = series.head(rows_per_column).dropna()
+        stripped = head.str.strip()
+        non_empty = stripped[stripped != ""]
+        # str.contains() è vettoriale (Rust engine) vs loop Python + regex.search() scalare
+        candidates = non_empty[non_empty.str.contains(NUMERIC_TOKEN_RE, na=False)].tolist()
+        remaining = max_samples - len(samples)
+        samples.extend(candidates[:remaining])
+
     return samples
 
 
@@ -306,6 +303,17 @@ def _convert_series(
     if s.isna().all():
         return pd.Series(pd.NA, index=series.index, dtype="Float64")
 
+    # FAST PATH: tenta conversione diretta senza nessuna regex.
+    # Copre CSV con numeri puri (ASCII o con solo separatore decimale non standard).
+    # Efficace anche su colonne sparse (1 valore su N \u2192 candidate_count piccolo ma rate=100%).
+    _candidate = s if (not decimal or decimal == ".") else s.str.replace(decimal, ".", regex=False)
+    _direct = pd.to_numeric(_candidate, errors="coerce").astype("Float64")
+    _non_empty = s.notna() & (s != "")
+    _candidate_count = int(_non_empty.sum())
+    if _candidate_count > 0 and int(_direct.notna().sum()) / _candidate_count >= 0.95:
+        return _direct  # salta le 5 passate regex successive
+
+    # SLOW PATH: pipeline regex completa per valori con simboli/valute/formato locale.
     # Batch replace: spazi non-breaking -> spazio normale
     s = s.str.replace("\u202F", " ", regex=False).str.replace("\u2009", " ", regex=False)
 

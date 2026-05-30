@@ -405,14 +405,29 @@ def optimize_dtypes(
 
 def _count_rows_fast(path: Path) -> int:
     """
-    Conta righe del CSV velocemente senza parsing completo.
-    Usa newline counting (molto veloce).
+    Conta righe del CSV. Per file < 10 MB: conteggio esatto.
+    Per file > 10 MB: stima euristica (±5%) leggendo solo i primi 64 KB.
+    L'errore è accettabile per il sampling stratificato.
     """
-    count = 0
+    file_size = path.stat().st_size
+    if file_size <= 10 * 1024 * 1024:
+        count = 0
+        with open(path, 'rb') as f:
+            for _ in f:
+                count += 1
+        return count
+
+    _SAMPLE = 65_536  # 64 KB
     with open(path, 'rb') as f:
-        for _ in f:
-            count += 1
-    return count
+        chunk = f.read(_SAMPLE)
+    nl = chunk.count(b'\n')
+    if nl == 0:
+        count = 0
+        with open(path, 'rb') as f:
+            for _ in f:
+                count += 1
+        return count
+    return int(file_size / (_SAMPLE / nl))
 
 
 def _generate_stratified_indices(
