@@ -1,4 +1,0 @@
-# Dipendenze per sviluppo locale (include TUI desktop/terminal)
--r requirements.txt
-textual>=0.89,<0.91
-rich>=13.9

@@ -1,0 +1,39 @@
+modules = ["nodejs-24", "python-3.11"]
+
+[deployment]
+router = "application"
+deploymentTarget = "autoscale"
+
+[deployment.postBuild]
+args = ["pnpm", "store", "prune"]
+env = { "CI" = "true" }
+
+[workflows]
+
+[agent]
+stack = "PNPM_WORKSPACE"
+expertMode = true
+
+[postMerge]
+path = "scripts/post-merge.sh"
+timeoutMs = 20000
+
+[[ports]]
+localPort = 8000
+externalPort = 8000
+
+[[ports]]
+localPort = 8080
+externalPort = 80
+
+[[ports]]
+localPort = 8081
+externalPort = 8081
+
+[[ports]]
+localPort = 23199
+externalPort = 3001
+
+[nix]
+channel = "stable-25_05"
+packages = ["glibcLocales", "libxcrypt", "pkg-config", "unzip", "xsimd"]

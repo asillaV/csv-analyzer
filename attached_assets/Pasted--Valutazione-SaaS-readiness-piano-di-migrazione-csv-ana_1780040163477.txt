@@ -1,0 +1,242 @@
+# Valutazione SaaS-readiness & piano di migrazione — csv-analyzer
+
+## Contesto
+
+Vuoi decidere se trasformare questo CSV/signal analyzer (Python + Streamlit) in un
+prodotto SaaS vendibile (multiutente, auth, billing) e con quale architettura.
+Questo documento è una **valutazione tecnica basata sul codice reale** (non sulle
+intenzioni), seguita da un piano. Vincoli rispettati: ogni affermazione cita file e
+funzione; nessun entusiasmo di default; **nessun codice di refactoring** — solo
+valutazione e piano. Il codice arriva solo dopo tua conferma.
+
+Contesto raccolto da te: ambizione **MVP / pochi clienti** nei primi 12 mesi, team
+**solo-Python**. Questo pesa sulla raccomandazione finale (Fase 3).
+
+Evidenze raccolte da: ispezione diretta + 3 agenti di esplorazione su (a) moduli
+`core/`, (b) accoppiamento Streamlit in `web_app.py`, (c) test/persistenza/sicurezza.
+
+---
+
+## FASE 1 — Analisi della codebase
+
+### 1.1 Struttura del progetto
+
+```
+csv-analyzer/
+├── web_app.py            # 2.988 righe — UNICO file che importa streamlit. App monolitica.
+├── main.py               # entrypoint TUI (Textual)
+├── desktop_app_tk.py     # entrypoint desktop (Tkinter)
+├── ui/                   # desktop_app.py, main_app.py (Tkinter/Textual)
+├── core/                 # 15 moduli — logica pura, ZERO streamlit
+├── tests/                # 12 file di test, ~112 casi, coverage gate 80%
+├── presets/              # preset salvati come JSON (globali, non per-utente)
+├── config.json           # config desktop (limiti alti)
+├── config_web.json       # config web (limiti bassi)
+├── requirements.txt      # pandas, numpy, plotly[kaleido], scipy, streamlit
+├── requirements-dev.txt  # textual, rich
+└── .github/workflows/ci.yml  # pytest su Py3.10-3.12 × Ubuntu/Windows + ruff
+```
+
+Nessun `pyproject.toml`/`setup.py`/`setup.cfg`: **il progetto non è impacchettato**
+come libreria installabile. `core/` è importato per path relativo (`from core.x import y`),
+non come package distribuibile. Questo è il primo ostacolo concreto al riuso esterno.
+
+### 1.2 Dove sta la logica core e quanto è accoppiata a Streamlit
+
+**Risultato chiave: la separazione logica/UI è già fatta, ed è buona.** Tutti i 15
+moduli in `core/` hanno **0 import di `streamlit`** e **0 riferimenti `st.*`** (verificato
+con grep su tutta la dir). L'unico file contaminato è `web_app.py`.
+
+**Funzioni PURE / riutilizzabili così come sono** (input → output, nessuno stato globale/UI):
+- `core/analyzer.py` — `CsvAnalyzer`, `analyze_csv()` (detect encoding/delimiter/header)
+- `core/csv_cleaner.py` — `clean_dataframe()`, `suggest_number_format()` (vettorializzato)
+- `core/loader.py` / `loader_optimized.py` / `loader_v2.py` — `load_csv()` (+ chunked/sampling/pyarrow); solo I/O di lettura
+- `core/signal_tools.py` — `resolve_fs()`, `apply_filter()`, `compute_fft()`, `validate_filter_spec()` (cuore del dominio)
+- `core/quality.py` — `run_quality_checks()` e check (monotonicity/gap/spike)
+- `core/downsampling.py` — `downsample_series()` (pura salvo cache modulo bounded a 64)
+- `core/signal_transforms.py` — `apply_transform()`, `apply_transform_pipeline()`, `validate_transform_spec()`
+
+**Moduli con side-effect (riutilizzabili ma da rivedere per il web):**
+- `core/preset_manager.py` — I/O su `presets/` (dir globale, hardcoded `Path(__file__).parent.parent / "presets"`); nessun concetto di utente
+- `core/plot_manager.py` — scrive HTML in `outputs/` **e apre il browser** (`webbrowser.open`): inadatto a un server multiutente così com'è
+- `core/report_manager.py`, `core/visual_report_manager.py` — scrivono file in `outputs/` (path globale); Kaleido opzionale
+- `core/logger.py` — `LogManager` con stato di classe e file log giornaliero in `logs/`
+
+**Funzioni intrecciate con `st.*` / session_state / rerun (tutte in `web_app.py`):**
+- Tutto dentro un'unica `main()` (riga 1147): parsing (1300-1403), quality (1409-1440),
+  form (1587-1684), pipeline trasformazioni (1693-1891), rendering plot (2252-2668),
+  report (2703-2976). Nessuna separazione a strati, nessun confine request/response.
+- Wrapper di cache attorno alla logica core: `_apply_filter_cached`, `_compute_fft_cached`,
+  `_apply_transform_pipeline_cached` (chiamano `core/` ma vivono dentro session_state).
+
+### 1.3 Stima % codice riutilizzabile vs da riscrivere
+
+| Strato | Righe ca. | Verdetto |
+|---|---|---|
+| `core/` (15 moduli) | ~5.000 | **Riutilizzabile ~95% così com'è** (i moduli con I/O su path globali vanno parametrizzati, non riscritti) |
+| `web_app.py` | 2.988 | **Da riscrivere ~85-90%**: è UI + orchestrazione legata al modello rerun. Salvabili: le sequenze di chiamata a `core/` (la "ricetta" di orchestrazione) e la logica di validazione limiti |
+| `ui/` (Tkinter/Textual) | ~1.000 | Non rilevante per il SaaS — non migrare |
+
+**In breve: il valore di dominio è già in `core/` ed è sano. Il lavoro vero non è
+"portare la logica" ma costruire da zero lo strato applicativo (auth, stato, persistenza,
+API/UI web) che oggi semplicemente non esiste.**
+
+### 1.4 Punti dove lo stato dipende dal modello "rerun" di Streamlit (i veri ostacoli)
+
+Conteggi reali in `web_app.py`: **208** riferimenti `st.session_state`, **7** chiamate
+`st.rerun()`, **0** decoratori `@st.cache_data/@st.cache_resource`, **1** `st.file_uploader`.
+
+Pattern che funzionano *solo* grazie al rerun (da ridisegnare, non da portare):
+1. **Trucco del nonce sul form** (riga 1587): `st.form(f"controls_{nonce}")`; il reset avviene
+   incrementando `_controls_nonce` (riga 562) per forzare un nuovo widget. Concetto puramente Streamlit.
+2. **Pending-action + rerun** (righe 1828/1891 delete step, 1941 delete preset, 2104-2116 save preset):
+   si setta un flag in session_state e si chiama `st.rerun()` per processarlo al giro dopo.
+3. **Invalidazione cache per confronto tra rerun** (righe 1688-1691): si confronta lo stato
+   "fill/interpolate" precedente con quello corrente assumendo che session_state persista tra rerun.
+4. **Cache manuale in session_state** (NON `@st.cache_data`, contrariamente a quanto dice CLAUDE.md):
+   `_cached_df`, `_filter_cache` (max 32), `_fft_cache` (max 16), `_quality_cache` (max 4),
+   `_transform_cache` (max 32) — eviction FIFO, chiave include `file_sig = (session_id, size, sha)`
+   (righe 175-502, 317-339). Più un `@lru_cache(maxsize=1)` per la config (riga 123).
+
+> Nota di accuratezza: `CLAUDE.md` descrive caching via `@st.cache_data` e features non del
+> tutto allineate al codice (es. il caching reale è manuale in session_state). La doc è in
+> parte aspirazionale; mi sono basato sul codice.
+
+---
+
+## FASE 2 — Valutazione SaaS-readiness
+
+| Asse | Giudizio | Evidenza |
+|---|---|---|
+| **Separazione logica/UI** | **OK** | `core/` 100% privo di streamlit; UI isolata in `web_app.py`. È il punto di forza del progetto. |
+| **Stato & concorrenza multiutente** | **Debole** | Stato in `st.session_state` (208 ref), legato al rerun e per-tab di browser. Isolamento solo implicito di Streamlit; nessun contesto utente/tenant passato a `core/`. Cache FIFO non condivisa tra utenti né tenant-aware. |
+| **Auth & multi-tenancy** | **Assente** | Zero login/user/token/tenant nel codice. `_ensure_session_id()` genera un UUID per-tab solo per invalidare la cache (web_app.py ~175). Nessun user_id su nessuna struttura dati. |
+| **Persistenza dati** | **Assente (DB) / Debole (file)** | Nessun DB/ORM (no sqlite/postgres/sqlalchemy). Preset = JSON in `presets/` globale; output/report/log su filesystem globale. Nessun dato utente persistente, nessun isolamento. |
+| **Sicurezza** | **OK (base) — non SaaS-grade** | Limiti upload applicati prima del parsing (`_check_size_limit`, `_check_dataframe_limits`, web_app.py ~145-172) con timeout di parsing. Sanitizzazione filename preset reale (blacklist `<>:"/\|?*` → `_`, no `..`, `core/preset_manager.py:34-54`). Nessun `eval/exec/pickle`; solo `json.load`. XSS: `html.escape` su nomi colonna (test in `test_web_app_session.py`). Nessun secret hardcoded, nessun `.env`/`st.secrets`. **Manca tutto il livello SaaS**: rate limiting, audit, authz, isolamento per-tenant. |
+| **Testabilità** | **OK** | 12 file di test, ~112 casi, gate coverage **80%** in CI (Py3.10-3.12 × Ubuntu/Windows + ruff). I test importano `core.*` direttamente e testano funzioni pure; solo `test_web_app_session.py` mocka `streamlit.session_state`. La logica è già testabile fuori da Streamlit. |
+
+**Sintesi Fase 2:** la base *tecnica di dominio* è solida e testata; **tutto lo strato
+"prodotto SaaS" (auth, DB, tenancy, sessioni server-side, billing) è da costruire da zero.**
+Non è un refactoring: è un nuovo strato applicativo attorno a un core sano.
+
+---
+
+## FASE 3 — Raccomandazione architetturale
+
+### 3.1 Le due opzioni, con trade-off espliciti
+
+**Opzione A — Backend FastAPI + frontend React/Next.js**
+- *Cosa si guadagna*: massima scalabilità e controllo UX; frontend e backend scalano in modo
+  indipendente; API riusabile (mobile/integrazioni); modello stateless naturale per multi-tenant.
+- *Cosa si perde / rischi*: due codebase e due linguaggi; serve gestire stato lato client,
+  auth token, CORS, build pipeline JS. Il plotting interattivo va ricostruito (Plotly.js lato React).
+- *Sforzo stimato*: **alto** (ordine di mesi-uomo per arrivare a parità funzionale + auth/billing).
+- *Adatto se*: prodotto serio/scalabile e team con competenze React/TS. **Non è il tuo caso oggi**
+  (MVP, team solo-Python): introdurrebbe un linguaggio e un rischio che non ti servono ancora.
+
+**Opzione B — Framework Python full-stack (Reflex o NiceGUI)** ⟵ *raccomandata per il tuo contesto*
+- *Cosa si guadagna*: un solo linguaggio (Python), nessuna riscrittura del dominio, time-to-market
+  rapido per un MVP; modello a stato esplicito (classi di stato per-sessione) molto più adatto al
+  multiutente rispetto al rerun di Streamlit; integrazione diretta con `core/` e con un DB via SQLAlchemy.
+- *Cosa si perde / rischi*: tetto di scalabilità/personalizzazione UX più basso di A; dipendenza da un
+  framework più giovane (ecosistema/assunzioni meno maturi di React); se in futuro servisse un'app
+  mobile o integrazioni API estese, potresti dover comunque estrarre un backend (ma il passo 3.2
+  rende questa transizione indolore).
+- *Sforzo stimato*: **medio** — dominato dalla costruzione di auth + persistenza + porting UI, non dalla logica.
+- *Adatto se*: MVP/pochi clienti, team Python. **È il tuo caso.**
+
+> Reflex vs NiceGUI: Reflex ha un modello di stato reattivo a componenti più strutturato (meglio
+> per app con molto stato come questa); NiceGUI è più immediato per UI semplici. Per un'app con
+> form complessi, pipeline e plot, **Reflex** è il candidato primario da valutare. La scelta fine
+> va fatta con un piccolo spike (vedi verifica).
+
+### 3.2 Primo passo a basso rischio: estrarre il core in un package indipendente
+
+Questo passo è **comune a entrambe le opzioni** e **non rompe l'app attuale** (Streamlit continua a
+funzionare importando dallo stesso package). Obiettivo: rendere `core/` un package installabile e
+**parametrizzare gli I/O su path globali** (preset/output/log) così che possano diventare per-utente.
+
+Struttura target proposta:
+
+```
+csv-analyzer/
+├── pyproject.toml            # NUOVO: rende installabile il package (pip install -e .)
+├── src/
+│   └── csv_core/             # ex core/, rinominato come package pubblico
+│       ├── __init__.py       # espone l'API pubblica stabile
+│       ├── analyzer.py
+│       ├── csv_cleaner.py
+│       ├── loader*.py
+│       ├── signal_tools.py
+│       ├── signal_transforms.py
+│       ├── quality.py
+│       ├── downsampling.py
+│       ├── presets.py        # ex preset_manager.py — directory iniettata, non hardcoded
+│       ├── reporting.py      # ex report/visual_report — output dir iniettata
+│       └── plotting.py       # ex plot_manager.py — SENZA webbrowser.open; ritorna figura/HTML
+├── apps/
+│   ├── streamlit_app.py      # ex web_app.py — invariato funzionalmente, importa csv_core
+│   └── (futuro) reflex_app/  # nuova UI SaaS (Fase B)
+└── tests/                    # invariati; cambiano solo gli import a csv_core
+```
+
+Punti di parametrizzazione minimi (da `Path(__file__).parent...` a parametro/iniezione):
+- `core/preset_manager.py:21` `PRESETS_DIR` → argomento/contesto
+- `core/plot_manager.py` / `report_manager.py` / `visual_report_manager.py` → `outputs_dir` iniettato
+- `core/plot_manager.py` → rimuovere `webbrowser.open` dal percorso server (renderlo opt-in CLI)
+- `core/logger.py` → directory log configurabile
+
+Questo è puro refactoring strutturale a rischio quasi nullo: i test esistenti (gate 80%) fanno da rete.
+
+### 3.3 Cosa NON migrare e cosa riscrivere da zero
+
+**Da NON migrare:**
+- `ui/desktop_app.py`, `ui/main_app.py`, `desktop_app_tk.py`, `main.py` — interfacce desktop/TUI
+  non pertinenti al SaaS. Possono restare come tool locali; non vanno portate sul web.
+- I pattern rerun-dipendenti di `web_app.py` (nonce del form, pending-action+rerun, cache FIFO in
+  session_state): **non hanno equivalente** in un modello a stato server-side e vanno abbandonati, non tradotti.
+
+**Da RISCRIVERE da zero (non esistono oggi):**
+- Strato auth (registrazione/login, hashing password, sessioni server-side o JWT).
+- Persistenza relazionale (PostgreSQL + SQLAlchemy): tabelle `user`/`tenant` e `tenant_id` su
+  preset/report; i preset passano da file globali a record per-utente.
+- Strato di storage file per-tenant (upload non in memoria di processo ma su storage isolato).
+- Billing (Stripe o simili) — fuori dal codice attuale.
+- Lo strato UI web (Reflex) che sostituisce `web_app.py`, riusando le "ricette" di orchestrazione
+  di `core/` ma con stato esplicito per-sessione.
+
+**Da PARAMETRIZZARE (riuso, non riscrittura):** i 4 moduli `core/` con I/O su path globali (3.2).
+
+---
+
+## Sequenza operativa proposta (dopo tua conferma)
+
+1. **Spike comparativo (1-2 giorni)**: mini-prototipo di una sola schermata (upload + plot FFT) in
+   Reflex e in NiceGUI, importando `core/`, per scegliere il framework con dati reali. *(opzione B)*
+2. **Estrazione package `csv_core` + `pyproject.toml`** con parametrizzazione I/O (3.2), mantenendo
+   Streamlit funzionante e i test verdi. *(passo a rischio nullo, comune ad A e B)*
+3. **Fondamenta SaaS**: PostgreSQL + SQLAlchemy, modello `user`/`tenant`, auth, preset per-utente.
+4. **UI web** (Reflex) sulle schermate principali, riusando `csv_core`.
+5. **Billing + hardening** (rate limit, audit, isolamento storage upload).
+
+> Decisioni ancora aperte (mi servirà input prima dei passi 3-5, non ora): provider billing,
+> dove ospitare (PaaS vs container), requisiti di residenza/retention dei dati caricati.
+
+## Verifica
+
+- **Dopo il passo 2** (estrazione package): `pytest tests/ -v --cov=core --cov-fail-under=80` deve
+  restare verde senza modifiche di logica (solo import aggiornati), e `streamlit run apps/streamlit_app.py`
+  deve funzionare identico a oggi — prova che l'estrazione non ha rotto nulla.
+- **Spike framework**: la schermata prototipo deve caricare un CSV di `tests_csv/` e mostrare FFT/filtro
+  usando `csv_core` senza `webbrowser.open`, confermando che il core gira fuori da Streamlit in un server multiutente.
+
+---
+
+### Nota finale (onestà richiesta)
+Il progetto è in una posizione **migliore della media** per una migrazione: il dominio è già
+disaccoppiato e testato. Il rischio non è tecnico-sul-core, è di **prodotto/scope**: auth, tenancy,
+persistenza e billing sono ~l'80% del lavoro reale e oggi non esistono. Per un MVP con team Python,
+spendere subito in un frontend React (opzione A) sarebbe sovra-ingegnerizzazione. Parti dal passo 2
+(estrazione, rischio nullo) e dallo spike B.
+
+**Come da tua richiesta, non ho scritto codice di refactoring. Procedo solo dopo tua conferma.**
