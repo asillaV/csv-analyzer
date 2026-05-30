@@ -138,7 +138,10 @@ def _analyze_sampling(x: pd.Index | pd.Series | None) -> FsInfo:
 
     try:
         if is_datetime:
-            values = pd.to_datetime(series).astype("int64") / 1e9  # ns -> s
+            # Forza la risoluzione a ns prima di convertire in int64: pandas >=2.2/3.0
+            # puo' restituire datetime64[us]/[ms]/[s] e astype("int64") darebbe il
+            # conteggio nell'unita' nativa, falsando fs (es. [us] -> 1000x). [ns] e' robusto.
+            values = pd.to_datetime(series).astype("datetime64[ns]").astype("int64") / 1e9  # ns -> s
             unit = "seconds"
             source = "datetime"
         else:

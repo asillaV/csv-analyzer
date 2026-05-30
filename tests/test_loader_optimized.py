@@ -163,10 +163,12 @@ class TestLoadCsvSampled:
             sample_size=10000
         )
 
-        assert len(df) == 10000  # Carica solo sample_size righe
+        # Per file >10MB _count_rows_fast stima il totale (±5%), quindi sia il
+        # conteggio totale sia il numero di righe campionate sono approssimati.
+        assert len(df) == pytest.approx(10000, rel=0.05)  # ~sample_size
         assert metadata["is_sample"] is True
         assert metadata["sampling_ratio"] < 1.0
-        assert metadata["total_rows"] == 150_000
+        assert metadata["total_rows"] == pytest.approx(150_000, rel=0.05)
 
     def test_sampled_data_quality(self, large_csv):
         """Dati campionati devono essere validi"""

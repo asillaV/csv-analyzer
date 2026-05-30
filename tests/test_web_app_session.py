@@ -321,6 +321,11 @@ def test_parse_cleanup_on_exception(monkeypatch):
         def Process(self, *args, **kwargs):
             raise RuntimeError("process boom")
 
+    # web_app usa un fast-path a thread per file <= _THREADING_SIZE_THRESHOLD (200MB),
+    # che non crea file temporanei ne' usa multiprocessing. Abbassiamo la soglia a 0
+    # per forzare il path subprocess, che e' quello che questo test verifica (cleanup
+    # del file temporaneo + propagazione dell'eccezione).
+    monkeypatch.setattr(web_app, "_THREADING_SIZE_THRESHOLD", 0)
     monkeypatch.setattr(web_app.tempfile, "mkstemp", fake_mkstemp)
     monkeypatch.setattr(web_app.mp, "get_context", lambda _: FailingContext())
 

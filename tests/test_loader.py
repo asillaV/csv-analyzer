@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 from core.loader import load_csv
@@ -38,8 +39,10 @@ def test_load_csv_without_cleaning(tmp_path: Path) -> None:
 
     df = load_csv(str(csv_path), delimiter=";", header=0, apply_cleaning=False)
 
-    # FASE 1: Con engine C, dtype=str produce dtype 'object' invece di 'string'
-    assert df["value"].dtype == "object"
+    # Senza cleaning la colonna non deve essere convertita in numerico.
+    # pandas <3 -> 'object', pandas 3.0 (infer_string) -> StringDtype: entrambi ok,
+    # l'importante e' che resti la stringa grezza.
+    assert not pd.api.types.is_numeric_dtype(df["value"])
     assert df["value"].iloc[0] == "1,234.56"
 
 
