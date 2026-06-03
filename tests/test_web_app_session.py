@@ -328,6 +328,8 @@ def test_parse_cleanup_on_exception(monkeypatch):
     monkeypatch.setattr(web_app, "_THREADING_SIZE_THRESHOLD", 0)
     monkeypatch.setattr(web_app.tempfile, "mkstemp", fake_mkstemp)
     monkeypatch.setattr(web_app.mp, "get_context", lambda _: FailingContext())
+    # Forza il percorso subprocess anche per file piccoli (test verifica cleanup del subprocess path)
+    monkeypatch.setattr(web_app, "_THREADING_SIZE_THRESHOLD", 0)
 
     with pytest.raises(RuntimeError):
         web_app._parse_csv_with_timeout(
