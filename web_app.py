@@ -18,6 +18,8 @@ import uuid
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+import plotly.io as _pio
+_pio.templates.default = "plotly_dark"
 import streamlit as st
 
 from core.analyzer import analyze_csv
@@ -50,6 +52,14 @@ from core.signal_tools import (
     apply_filter,
     compute_fft,
 )
+from core.signal_transforms import (
+    TransformSpec,
+    TRANSFORM_LABELS,
+    TRANSFORM_GUIDE,
+    apply_transform_pipeline,
+    validate_transform_spec,
+    transform_spec_cache_key,
+)
 from core.quality import run_quality_checks, DataQualityReport
 from core.preset_manager import (
     save_preset,
@@ -70,10 +80,11 @@ RESETTABLE_KEYS = {
     "x_col",
     "y_cols",
     "plot_mode",
-    "x_min_txt",
-    "x_max_txt",
-    "y_min_txt",
-    "y_max_txt",
+    "ax_x_min",
+    "ax_x_max",
+    "ax_y_mode",
+    "ax_y_min_global",
+    "ax_y_max_global",
     "fillna_forward",
     # Advanced
     "manual_fs",
@@ -84,7 +95,12 @@ RESETTABLE_KEYS = {
     "f_lo",
     "f_hi",
     "overlay_orig",
-    # Note: enable_fft, fft_use, detrend removed: widgets have no key, reset automatically with form nonce
+    # sidebar FFT widgets (moved from form Advanced section)
+    "sidebar_enable_fft",
+    "sidebar_fft_use",
+    "sidebar_detrend",
+    # Trasformazioni
+    "_n_transforms",
     # Report testuale
     "report_format",
     "report_base_name",
@@ -338,6 +354,8 @@ def _init_result_caches() -> None:
         st.session_state["_fft_cache"] = {}
     if "_quality_cache" not in st.session_state:
         st.session_state["_quality_cache"] = {}
+    if "_transform_cache" not in st.session_state:
+        st.session_state["_transform_cache"] = {}
 
 
 def _get_filter_cache_key(
@@ -362,11 +380,15 @@ def _get_fft_cache_key(
     fs: float,
     fs_source: Optional[str],
     fill_stamp: bool,
+    filter_sig: Optional[Tuple] = None,
 ) -> Tuple:
     """Generate hashable cache key for FFT results."""
     from dataclasses import astuple
-    # Include fs_source e stato del fill per invalidare quando cambiano questi parametri
-    return (column, file_sig, is_filtered, astuple(fftspec), fs, fs_source, fill_stamp)
+    # Include fs_source e stato del fill per invalidare quando cambiano questi parametri.
+    # Include filter_sig (astuple(fspec)) quando is_filtered: lo spettro del segnale
+    # filtrato dipende dal filtro applicato, quindi deve invalidarsi al cambio filtro
+    # (es. MA finestra 10 -> 1). Per l'originale resta None (non dipende dal filtro).
+    return (column, file_sig, is_filtered, astuple(fftspec), fs, fs_source, fill_stamp, filter_sig)
 
 
 def _get_cached_filter(key: Tuple) -> Optional[pd.Series]:
@@ -412,10 +434,11 @@ def _cache_fft_result(key: Tuple, freqs: np.ndarray, amp: np.ndarray) -> None:
 
 
 def _invalidate_result_caches() -> None:
-    """Clear all filter, FFT and quality caches (called on file change)."""
+    """Clear all filter, FFT, transform and quality caches (called on file change)."""
     st.session_state.pop("_filter_cache", None)
     st.session_state.pop("_fft_cache", None)
     st.session_state.pop("_quality_cache", None)
+    st.session_state.pop("_transform_cache", None)
 
 
 def _apply_filter_cached(
@@ -451,6 +474,44 @@ def _apply_filter_cached(
         return None
 
 
+MAX_TRANSFORM_CACHE_SIZE = 32
+
+
+def _apply_transform_pipeline_cached(
+    series: pd.Series,
+    x_series: Optional[pd.Series],
+    specs: List[TransformSpec],
+    fs_info: Any,
+    file_sig: FileSignature,
+    column_name: str,
+    fill_stamp: bool,
+) -> Tuple[pd.Series, Optional[pd.Series], List[str], bool]:
+    """Apply transform pipeline with caching. Returns (y, x, descriptions, changed_length)."""
+    _init_result_caches()
+    specs_key = tuple(transform_spec_cache_key(s) for s in specs)
+    fs_val = fs_info.value if fs_info else None
+    fs_src = fs_info.source if fs_info else None
+    cache_key = (column_name, file_sig, specs_key, fs_val, fs_src, fill_stamp)
+
+    cache = st.session_state.setdefault("_transform_cache", {})
+    if cache_key in cache:
+        return cache[cache_key]
+
+    y_out, x_out, descs, changed = apply_transform_pipeline(
+        series, x_series, specs, fs_info, col_name=column_name
+    )
+    result: Tuple[pd.Series, Optional[pd.Series], List[str], bool] = (
+        y_out.copy(),
+        x_out.copy() if x_out is not None else None,
+        descs,
+        changed,
+    )
+    if len(cache) >= MAX_TRANSFORM_CACHE_SIZE:
+        cache.pop(next(iter(cache)))
+    cache[cache_key] = result
+    return result
+
+
 def _compute_fft_cached(
     series: pd.Series,
     fs_value: float,
@@ -460,10 +521,17 @@ def _compute_fft_cached(
     column_name: str,
     is_filtered: bool,
     fill_stamp: bool,
+    fspec: Optional[FilterSpec] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Compute FFT with caching. Returns (freqs, amp) arrays."""
+    from dataclasses import astuple
     _init_result_caches()
-    cache_key = _get_fft_cache_key(column_name, file_sig, is_filtered, fftspec, fs_value, fs_source, fill_stamp)
+    # La firma del filtro entra nella chiave solo per lo spettro del segnale filtrato,
+    # così cambiando il filtro (es. MA 10 -> 1) la FFT del filtrato non resta in cache stale.
+    filter_sig = astuple(fspec) if (is_filtered and fspec is not None) else None
+    cache_key = _get_fft_cache_key(
+        column_name, file_sig, is_filtered, fftspec, fs_value, fs_source, fill_stamp, filter_sig
+    )
     cached = _get_cached_fft(cache_key)
     if cached is not None:
         return cached
@@ -480,6 +548,9 @@ def _reset_all_settings() -> None:
 
     for key in list(st.session_state.keys()):
         if isinstance(key, str) and key.startswith("vis_report_"):
+            st.session_state.pop(key, None)
+    for key in list(st.session_state.keys()):
+        if isinstance(key, str) and (key.startswith("ax_y_min_") or key.startswith("ax_y_max_")):
             st.session_state.pop(key, None)
 
     # Reset plot and report outputs
@@ -501,6 +572,12 @@ def _reset_all_settings() -> None:
     st.session_state.pop("_loaded_preset", None)
     st.session_state.pop("_loaded_preset_name", None)
     st.session_state.pop("_pending_preset_save", None)
+
+    # Reset pannello trasformazioni (passi individuali + pending action)
+    for _k in list(st.session_state.keys()):
+        if isinstance(_k, str) and _k.startswith("tr_"):
+            st.session_state.pop(_k, None)
+    st.session_state.pop("_pending_delete_step", None)
 
     st.session_state["_controls_nonce"] = st.session_state.get("_controls_nonce", 0) + 1
 
@@ -605,7 +682,7 @@ def _parse_range_x(min_s: str, max_s: str, x: pd.Series | pd.Index) -> Optional[
 def _fmt_csv_token(token: Optional[str]) -> str:
     if token is None:
         return "auto"
-    if token == "\t" or token == "	":
+    if token == "\t" or token == "      ":
         return "\\t"
     if token == " ":
         return "' '"
@@ -768,7 +845,12 @@ def _plot_xy(x: Optional[pd.Series], y: pd.Series, name: str) -> go.Figure:
         fig.add_trace(go.Scatter(y=y, mode="lines", name=name))
         fig.update_xaxes(title="index")
     fig.update_yaxes(title=name)
-    fig.update_layout(margin=dict(l=40, r=20, t=30, b=40), height=420)
+    fig.update_layout(
+        margin=dict(l=40, r=20, t=30, b=40),
+        height=420,
+        paper_bgcolor="#020617",
+        plot_bgcolor="#0a1628",
+    )
     return fig
 
 
@@ -778,7 +860,13 @@ def _plot_fft(freqs: np.ndarray, amp: np.ndarray, title: str = "FFT") -> go.Figu
         fig.add_trace(go.Scatter(x=freqs, y=amp, mode="lines", name="amp"))
         fig.update_xaxes(title="Frequenza [Hz]")
         fig.update_yaxes(title="Ampiezza")
-    fig.update_layout(title=title, margin=dict(l=40, r=20, t=30, b=40), height=420)
+    fig.update_layout(
+        title=title,
+        margin=dict(l=40, r=20, t=30, b=40),
+        height=420,
+        paper_bgcolor="#020617",
+        plot_bgcolor="#0a1628",
+    )
     return fig
 
 # ---------------------- Quality checks ---------------------- #
@@ -950,78 +1038,224 @@ def _render_quality_badge_and_details(report: DataQualityReport) -> None:
 
 # --- HEADER pulito (senza riquadro), logo SINISTRA + bottoni piccoli ---
 def render_header():
-    import base64, mimetypes
-    from pathlib import Path
+    import html as _html
 
-    logo_path = Path("assets/logo.png")  # cambia nome/estensione se necessario
-    logo_tag = ""
-    if logo_path.exists():
-        mime = mimetypes.guess_type(logo_path.name)[0] or "image/png"
-        b64 = base64.b64encode(logo_path.read_bytes()).decode("utf-8")
-        logo_tag = f"<img class='logo' src='data:{mime};base64,{b64}' alt='Logo'>"
+    upload = st.session_state.get("file_upload")
+    sample_name = st.session_state.get("_sample_file_name")
+
+    if upload is not None:
+        fname = _html.escape(upload.name)
+        file_part = f'<span class="eng-fname">&#128196; {fname}</span>'
+    elif sample_name:
+        fname = _html.escape(sample_name)
+        file_part = f'<span class="eng-fname">&#128196; {fname}</span>'
+    else:
+        file_part = '<span class="eng-fname-empty">&#8212; nessun file caricato &#8212;</span>'
+
+    # Sinusoide "segnale": animata quando c'e' un file (in caricamento/caricato), piatta altrimenti
+    has_file = upload is not None or bool(sample_name)
+    wave_active = "eng-wave--active" if has_file else ""
+    wave_title = "segnale attivo" if has_file else "nessun segnale"
 
     st.markdown(
         f"""
         <style>
-          .app-header {{
-            background: transparent;
-            border: none;
-            box-shadow: none;
-            padding: 0;
-            margin: 0 0 10px 0;
-          }}
-          .brand {{
-            display: flex;
-            flex-direction: column;
-            align-items: flex-start;
-            gap: 8px;
-          }}
-          .brand .logo {{
-            height: 96px; width: auto; object-fit: contain;
-          }}
-          .brand h1 {{
-            margin: 4px 0 2px 0;
-            font-size: 4rem; line-height: .1; letter-spacing: .2px;
-          }}
-          .brand .subtitle {{
-            margin: 0 0 6px 0; font-size: 1rem;
-          }}
-          .actions {{
-            display: flex; gap: 8px; flex-wrap: wrap;
-          }}
-          .btn {{
-            display: inline-flex; align-items: center; gap: 6px;
-            padding: 6px 10px; border-radius: 9999px; font-size: .85rem;
-            text-decoration: none !important; border: 1px solid #2b2b2b;
-            transition: transform .08s ease, opacity .8s ease, border-color .2s ease, background .2s ease;
-          }}
-          .btn:active {{ transform: translateY(1px); }}
-          .btn-primary {{ background: #f4c430; color: #111; border-color: #d6a300; }}
-          .btn-primary:hover {{ background: #e0b51e; border-color: #c79c14; }}
-          .btn-ghost {{ background: #141414; color: #e8eaed; border-color: #2b2b2b; }}
-          .btn-ghost:hover {{ border-color: #3a3a3a; }}
-          .emoji {{ font-size: 1rem; }}
+          /* ===================== ENGINEERING DARK THEME ===================== */
 
-          @media (max-width: 760px) {{
-            .brand h1 {{ font-size: 1.35rem; }}
-            .brand .subtitle {{ font-size: .9rem; }}
+          /* Top bar */
+          .eng-topbar {{
+            display: flex;
+            align-items: center;
+            gap: 18px;
+            padding: 9px 16px;
+            background: #0f172a;
+            border-bottom: 1px solid #1e293b;
+            margin: -1rem -1rem 1.4rem -1rem;
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 0.85rem;
+          }}
+          .eng-logo {{
+            font-weight: 700;
+            letter-spacing: 0.14em;
+            color: #f1f5f9;
+            font-size: 0.88rem;
+          }}
+          .eng-connected {{
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            color: #10b981;
+            font-size: 0.75rem;
+            font-weight: 700;
+            letter-spacing: 0.1em;
+          }}
+          .eng-dot {{
+            font-size: 0.6rem;
+            animation: eng-pulse 2.2s ease-in-out infinite;
+          }}
+          @keyframes eng-pulse {{
+            0%, 100% {{ opacity: 1; }}
+            50%        {{ opacity: 0.35; }}
+          }}
+          .eng-fname {{ color: #64748b; font-size: 0.76rem; }}
+          .eng-fname-empty {{ color: #334155; font-size: 0.76rem; font-style: italic; }}
+          .eng-spacer {{ flex: 1; }}
+          /* Sinusoide "segnale": linea piatta a riposo, onda che scorre durante il caricamento */
+          .eng-wave {{
+            display: block;
+            width: 120px;
+            height: 22px;
+            overflow: hidden;
+          }}
+          .eng-wave svg {{ display: block; width: 120px; height: 22px; }}
+          .eng-wave path {{
+            fill: none;
+            stroke: #1e293b;
+            stroke-width: 1.6;
+            stroke-linecap: round;
+            transition: stroke 0.3s ease;
+          }}
+          .eng-wave-g {{ transform: translateX(0); }}
+          /* Stato attivo: file caricato/in caricamento -> onda verde che trasla */
+          .eng-wave--active path {{ stroke: #10b981; }}
+          .eng-wave--active .eng-wave-g {{
+            animation: eng-wave-move 2.2s linear infinite;
+          }}
+          @keyframes eng-wave-move {{
+            from {{ transform: translateX(0); }}
+            to   {{ transform: translateX(-100px); }}
+          }}
+
+          /* Sidebar background */
+          [data-testid="stSidebar"],
+          [data-testid="stSidebar"] > div:first-child {{
+            background-color: #0f172a !important;
+            border-right: 1px solid #1e293b !important;
+          }}
+
+          /* Sidebar section headers (### markdown) */
+          [data-testid="stSidebar"] h3 {{
+            font-family: 'Courier New', Courier, monospace !important;
+            font-size: 0.65rem !important;
+            font-weight: 700 !important;
+            letter-spacing: 0.14em !important;
+            text-transform: uppercase !important;
+            color: #10b981 !important;
+            margin: 1.1rem 0 0.35rem !important;
+            border-bottom: 1px solid #1e293b;
+            padding-bottom: 4px;
+          }}
+
+          /* Expander (FILTRO, FFT sections) */
+          [data-testid="stSidebar"] [data-testid="stExpander"] {{
+            border: 1px solid #1e293b !important;
+            border-radius: 2px !important;
+            background: transparent !important;
+            margin-bottom: 4px;
+          }}
+          [data-testid="stSidebar"] details > summary p {{
+            font-family: 'Courier New', Courier, monospace !important;
+            font-size: 0.68rem !important;
+            font-weight: 700 !important;
+            letter-spacing: 0.12em !important;
+            text-transform: uppercase !important;
+            color: #10b981 !important;
+          }}
+
+          /* Inputs — monospace */
+          input[type="number"], input[type="text"] {{
+            font-family: 'Courier New', Courier, monospace !important;
+            font-size: 0.88rem !important;
+          }}
+          [data-testid="stSidebar"] input:focus {{
+            border-color: #10b981 !important;
+            box-shadow: 0 0 0 2px #10b98125 !important;
+          }}
+
+          /* Labels */
+          [data-testid="stSidebar"] label > div > p,
+          [data-testid="stSidebar"] label > p {{
+            font-family: 'Courier New', Courier, monospace !important;
+            font-size: 0.72rem !important;
+            color: #94a3b8 !important;
+            letter-spacing: 0.06em !important;
+            text-transform: uppercase !important;
+          }}
+
+          /* Caption */
+          [data-testid="stCaptionContainer"] p {{
+            font-family: 'Courier New', Courier, monospace !important;
+            font-size: 0.7rem !important;
+            color: #475569 !important;
+          }}
+
+          /* Checkbox label */
+          [data-testid="stCheckbox"] label p {{
+            font-family: 'Courier New', Courier, monospace !important;
+            font-size: 0.8rem !important;
+          }}
+
+          /* Alert / success badge */
+          [data-testid="stAlert"] {{
+            border-radius: 2px !important;
+            font-family: 'Courier New', Courier, monospace !important;
+            font-size: 0.78rem !important;
+          }}
+
+          /* HR separator in sidebar */
+          [data-testid="stSidebar"] hr {{
+            border-color: #1e293b !important;
+            margin: 6px 0 !important;
+          }}
+
+          /* Form submit / primary button */
+          [data-testid="stFormSubmitButton"] button,
+          button[kind="primary"] {{
+            font-family: 'Courier New', Courier, monospace !important;
+            font-weight: 700 !important;
+            letter-spacing: 0.1em !important;
+            text-transform: uppercase !important;
+            background: #10b981 !important;
+            color: #020617 !important;
+            border: none !important;
+            border-radius: 2px !important;
+          }}
+          [data-testid="stFormSubmitButton"] button:hover {{
+            background: #059669 !important;
+          }}
+
+          /* Metric labels */
+          [data-testid="stMetricLabel"] p {{
+            font-family: 'Courier New', Courier, monospace !important;
+            font-size: 0.72rem !important;
+            letter-spacing: 0.08em !important;
+            text-transform: uppercase !important;
+            color: #64748b !important;
+          }}
+          [data-testid="stMetricValue"] {{
+            font-family: 'Courier New', Courier, monospace !important;
+            color: #f1f5f9 !important;
+          }}
+
+          /* File uploader */
+          [data-testid="stFileUploader"] {{
+            border: 1px dashed #1e293b !important;
+            border-radius: 3px !important;
           }}
         </style>
 
-        <div class="app-header">
-          <div class="brand">
-            {logo_tag}
-            <h1>Analizzatore CSV — Web</h1>
-            <p class="subtitle">Lean data analysis — Plot, Filtri, FFT e Report</p>
-            <div class="actions">
-              <a class="btn btn-primary" href="https://buymeacoffee.com/asillav" target="_blank" rel="noopener">
-                <span class="emoji">☕</span> Buy me a coffee
-              </a>
-              <a class="btn btn-ghost" href="https://asillav.github.io/" target="_blank" rel="noopener">
-                <span class="emoji">🐙</span> GitHub
-              </a>
-            </div>
-          </div>
+        <div class="eng-topbar">
+          <span class="eng-logo">[ CSV_ANALYZER ]</span>
+          <span class="eng-connected"><span class="eng-dot">&#9679;</span>&nbsp;CONNECTED</span>
+          {file_part}
+          <span class="eng-spacer"></span>
+          <span class="eng-wave {wave_active}" aria-hidden="true" title="{wave_title}">
+            <svg viewBox="0 0 100 24" preserveAspectRatio="none">
+              <g class="eng-wave-g">
+                <path d="M0,12 Q6.25,4 12.5,12 Q18.75,20 25,12 Q31.25,4 37.5,12 Q43.75,20 50,12 Q56.25,4 62.5,12 Q68.75,20 75,12 Q81.25,4 87.5,12 Q93.75,20 100,12 Q106.25,4 112.5,12 Q118.75,20 125,12 Q131.25,4 137.5,12 Q143.75,20 150,12 Q156.25,4 162.5,12 Q168.75,20 175,12 Q181.25,4 187.5,12 Q193.75,20 200,12" />
+              </g>
+            </svg>
+          </span>
         </div>
         """,
         unsafe_allow_html=True,
@@ -1103,7 +1337,7 @@ def main():
 
     render_header()
 
-    st.caption("Upload CSV → seleziona X/Y → limiti assi → Advanced (fs/filtri/FFT) → report")
+    st.caption("Upload CSV → seleziona X/Y → limiti assi → Sidebar (fs/filtri/FFT) → report")
 
     st.markdown(
         """
@@ -1526,103 +1760,186 @@ def main():
     if preset_notice:
         st.info(preset_notice)
 
-    # --- Controlli (form) --- #
-    with st.form(f"controls_{st.session_state.get('_controls_nonce', 0)}"):
-        x_col = st.selectbox("Colonna X (opzionale)", options=["—"] + cols, index=0)
-        fill_missing = st.checkbox(
-            "Riempimento valori mancanti (forward fill)",
-            key="fillna_forward",
-            help="Applica un forward fill alle colonne per colmare eventuali NaN.",
-        )
-        interpolate_x = st.checkbox(
-            "Interpola asse X (marker spaziale sparso)",
-            key="interpolate_x_col",
-            help=(
-                "Se la colonna X è un marker di posizione aggiornato raramente (es. ogni 250 mm), "
-                "i valori NaN intermedi vengono riempiti con interpolazione lineare invece di forward fill. "
-                "Elimina gli artefatti verticali nel grafico causati da più campioni con lo stesso X."
-            ),
-        )
-        y_cols = st.multiselect("Colonne Y", options=cols)
-        mode = st.radio("Modalità grafico", ["Sovrapposto", "Separati", "Cascata"], horizontal=True, index=0)
-        quality_mode = st.radio(
-            "Alta fedeltà / Prestazioni",
-            ["Alta fedeltà", "Prestazioni"],
-            horizontal=True,
-            key=quality_key,
-            help="Prestazioni applica downsampling LTTB a circa 10k punti per serie per migliorare la reattività. Filtri e FFT restano sui dati completi.",
-        )
-        st.caption(
-            "Il downsampling riduce la traccia prima del rendering. Usa Alta fedeltà se ti servono tutti i campioni (possibile lag oltre 100k punti)."
-        )
+    # ---- SIDEBAR: ADVANCED CONTROLS ----
+    # When a preset is loaded, push its values into session_state so keyed sidebar
+    # widgets pick them up on the next render (keyed widgets ignore value= if the
+    # key already exists in session_state).
+    if "_loaded_preset" in st.session_state:
+        st.session_state["manual_fs"] = float(preset_manual_fs)
+        st.session_state["enable_filter"] = preset_enable_filter
+        st.session_state["f_kind"] = filter_kind_options[preset_filter_kind_idx]
+        st.session_state["ma_win"] = int(preset_ma_win)
+        st.session_state["f_order"] = int(preset_filter_order)
+        st.session_state["f_lo"] = preset_f_lo
+        st.session_state["f_hi"] = preset_f_hi
+        st.session_state["overlay_orig"] = True
+        st.session_state["sidebar_enable_fft"] = preset_enable_fft
+        st.session_state["sidebar_detrend"] = preset_detrend
 
-        c1, c2 = st.columns(2)
-        with c1:
-            x_min_txt = st.text_input("X min (numero o datetime)", placeholder="es. 0 oppure 2024-09-01")
-            y_min_txt = st.text_input("Y min (numero)", placeholder="es. -10")
-        with c2:
-            x_max_txt = st.text_input("X max (numero o datetime)", placeholder="es. 1000 oppure 2024-09-02")
-            y_max_txt = st.text_input("Y max (numero)", placeholder="es. 10")
+    with st.sidebar:
+        st.markdown("### ⚙️ Campionamento")
+        manual_fs = st.number_input(
+            "Frequenza di campionamento (Hz)",
+            min_value=0.0,
+            value=float(preset_manual_fs),
+            step=0.1,
+            key="manual_fs",
+            help=">0 forza la fs; 0 = stima automatica dalla X",
+        )
+        st.caption("0 = stima automatica. Filtri Butterworth e FFT useranno la stessa fs.")
 
-        # ---- ADVANCED ----
-        with st.expander("Advanced", expanded=False):
-            # fs manuale in cima
-            manual_fs = st.number_input(
-                "Frequenza di campionamento manuale (Hz)",
-                min_value=0.0,
-                value=float(preset_manual_fs),
-                step=0.1,
-                help=">0 forza la fs; 0 = stima automatica dalla X"
-            )
-            st.caption("Filtri Butterworth e FFT useranno la stessa fs (manuale o stimata).")
+        # Live fs indicator
+        _cur_manual_fs = st.session_state.get("manual_fs", 0.0)
+        if _cur_manual_fs and float(_cur_manual_fs) > 0:
+            st.success(f"**fs = {float(_cur_manual_fs):.6g} Hz** (manuale)")
+        else:
+            _cached_fs = st.session_state.get("_sidebar_fs_info")
+            if _cached_fs and _cached_fs.get("value"):
+                st.info(f"**fs ≈ {_cached_fs['value']:.6g} Hz** ({_cached_fs['label']})")
+            else:
+                st.caption("fs: sarà stimata dalla colonna X al primo plot.")
 
-            enable_filter = st.checkbox("Abilita filtro", value=preset_enable_filter)
+        st.markdown("---")
+        with st.expander("🔧 Filtro", expanded=False):
+            enable_filter = st.checkbox("Abilita filtro", value=preset_enable_filter, key="enable_filter")
             f_kind = st.selectbox(
                 "Tipo filtro",
                 filter_kind_options,
                 index=preset_filter_kind_idx,
+                key="f_kind",
             )
-            ma_win = st.number_input("MA - finestra (campioni)", min_value=1, value=int(preset_ma_win), step=1)
-            f_order = st.number_input("Butterworth - ordine", min_value=1, value=int(preset_filter_order), step=1)
-
+            ma_win = st.number_input(
+                "MA - finestra (campioni)", min_value=1, value=int(preset_ma_win), step=1, key="ma_win"
+            )
+            f_order = st.number_input(
+                "Butterworth - ordine", min_value=1, value=int(preset_filter_order), step=1, key="f_order"
+            )
             cc1, cc2 = st.columns(2)
             with cc1:
-                f_lo = st.text_input("Cutoff low (Hz) - LP/HP/BP", value=preset_f_lo, placeholder="es. 5")
+                f_lo = st.text_input(
+                    "Cutoff low (Hz)", value=preset_f_lo, placeholder="es. 5", key="f_lo"
+                )
             with cc2:
-                f_hi = st.text_input("Cutoff high (Hz) - solo BP", value=preset_f_hi, placeholder="es. 20")
+                f_hi = st.text_input(
+                    "Cutoff high (Hz) - solo BP", value=preset_f_hi, placeholder="es. 20", key="f_hi"
+                )
+            overlay_orig = st.checkbox(
+                "Sovrapponi originale e filtrato", value=True, key="overlay_orig"
+            )
 
-            overlay_orig = st.checkbox("Sovrapponi originale e filtrato", value=True)
-
-            st.markdown("---")
+        st.markdown("---")
+        with st.expander("📊 FFT", expanded=False):
             fft_help = (
                 "Calcola lo spettro FFT per ogni serie selezionata."
                 if fft_available
                 else f"Servono almeno {MIN_ROWS_FOR_FFT} campioni per calcolare l'FFT."
             )
-
-            # No key= parameter: widget state is local to the form, resets automatically
             enable_fft = st.checkbox(
                 "Calcola FFT",
                 value=preset_enable_fft,
                 disabled=not fft_available,
                 help=fft_help,
+                key="sidebar_enable_fft",
             )
             if not fft_available:
                 st.caption(
                     f"Servono almeno {MIN_ROWS_FOR_FFT} campioni (dataset attuale: {total_rows})."
                 )
-
             fft_use = st.radio(
                 "FFT su",
                 ["Filtrato (se attivo)", "Originale"],
                 horizontal=True,
                 disabled=not fft_available,
+                key="sidebar_fft_use",
             )
             detrend = st.checkbox(
                 "Detrend (togli media)",
                 value=preset_detrend,
                 disabled=not fft_available,
+                key="sidebar_detrend",
             )
+
+        st.markdown("---")
+        with st.expander("📐 Limiti assi", expanded=False):
+            _ax_last_y = [c for c in st.session_state.get("_last_y_cols", []) if c]
+
+            st.caption("Asse X (globale)")
+            _axc1, _axc2 = st.columns(2)
+            with _axc1:
+                st.text_input("X min", key="ax_x_min", placeholder="es. 0")
+            with _axc2:
+                st.text_input("X max", key="ax_x_max", placeholder="es. 1000")
+
+            st.markdown("---")
+            st.radio(
+                "Scala Y",
+                ["Tutti i segnali", "Per segnale"],
+                horizontal=True,
+                key="ax_y_mode",
+            )
+
+            if st.session_state.get("ax_y_mode", "Tutti i segnali") == "Tutti i segnali":
+                _ayc1, _ayc2 = st.columns(2)
+                with _ayc1:
+                    st.text_input("Y min", key="ax_y_min_global", placeholder="es. -10")
+                with _ayc2:
+                    st.text_input("Y max", key="ax_y_max_global", placeholder="es. 10")
+            else:
+                if _ax_last_y:
+                    for _ayname in _ax_last_y:
+                        _aykey = _ayname.replace(" ", "_").replace(".", "_")
+                        st.caption(f"**{_ayname}**")
+                        _ayc1, _ayc2 = st.columns(2)
+                        with _ayc1:
+                            st.text_input("Y min", key=f"ax_y_min_{_aykey}", placeholder="auto")
+                        with _ayc2:
+                            st.text_input("Y max", key=f"ax_y_max_{_aykey}", placeholder="auto")
+                else:
+                    st.caption("Seleziona le colonne Y e premi Applica / Plot.")
+
+            if st.button("Azzera limiti", key="ax_reset_btn"):
+                for _rk in ["ax_x_min", "ax_x_max", "ax_y_mode", "ax_y_min_global", "ax_y_max_global"]:
+                    st.session_state.pop(_rk, None)
+                for _rkey in list(st.session_state.keys()):
+                    if isinstance(_rkey, str) and (
+                        _rkey.startswith("ax_y_min_") or _rkey.startswith("ax_y_max_")
+                    ):
+                        st.session_state.pop(_rkey, None)
+                st.rerun()
+
+    # --- Controlli (form) --- #
+    with st.form(f"controls_{st.session_state.get('_controls_nonce', 0)}"):
+        _col_x, _col_y = st.columns([1, 2])
+        with _col_x:
+            x_col = st.selectbox("Colonna X (opzionale)", options=["—"] + cols, index=0)
+            fill_missing = st.checkbox(
+                "Riempimento valori mancanti (forward fill)",
+                key="fillna_forward",
+                help="Applica un forward fill alle colonne per colmare eventuali NaN.",
+            )
+            interpolate_x = st.checkbox(
+                "Interpola asse X (marker spaziale sparso)",
+                key="interpolate_x_col",
+                help=(
+                    "Se la colonna X è un marker di posizione aggiornato raramente (es. ogni 250 mm), "
+                    "i valori NaN intermedi vengono riempiti con interpolazione lineare invece di forward fill. "
+                    "Elimina gli artefatti verticali nel grafico causati da più campioni con lo stesso X."
+                ),
+            )
+        with _col_y:
+            y_cols = st.multiselect("Colonne Y", options=cols)
+        _col_mode, _col_quality = st.columns(2)
+        with _col_mode:
+            mode = st.radio("Modalità grafico", ["Sovrapposto", "Separati", "Cascata"], horizontal=True, index=0)
+        with _col_quality:
+            quality_mode = st.radio(
+                "Alta fedeltà / Prestazioni",
+                ["Alta fedeltà", "Prestazioni"],
+                horizontal=True,
+                key=quality_key,
+                help="Prestazioni applica downsampling LTTB a circa 10k punti per serie per migliorare la reattività. Filtri e FFT restano sui dati completi.",
+            )
+            st.caption("Prestazioni = downsampling LTTB ~10k pt.")
 
         submitted = st.form_submit_button("Applica / Plot")
 
@@ -1632,6 +1949,206 @@ def main():
     if prev_fill != fill_stamp:
         _invalidate_result_caches()
         st.session_state["_fill_last_stamp"] = fill_stamp
+
+    # ---- TRASFORMAZIONI (FUORI DAL FORM) ----
+    with st.expander(
+        "Trasformazioni",
+        expanded=st.session_state.get("_n_transforms", 0) > 0,
+    ):
+        st.caption("Trasformazioni applicate al segnale prima del filtro, in sequenza.")
+
+        with st.expander("ℹ️ Guida trasformazioni", expanded=False):
+            _guide_rows = []
+            for _gk, _glabel in TRANSFORM_LABELS.items():
+                _g = TRANSFORM_GUIDE[_gk]
+                _guide_rows.append({
+                    "Tipo": _glabel,
+                    "Formula": _g["formula"],
+                    "Descrizione": _g["note"],
+                    "Asse X": _g["x"],
+                    "Cambia lunghezza": _g["len"],
+                })
+            st.dataframe(
+                pd.DataFrame(_guide_rows).set_index("Tipo"),
+                use_container_width=True,
+                hide_index=False,
+            )
+            st.caption(
+                "⚠️ Le trasformazioni con 'Cambia lunghezza = Sì' (Derivata, Ricampionamento) "
+                "non possono essere incluse nel report statistico insieme alle altre colonne."
+            )
+
+        # Processa delete pendente PRIMA di qualsiasi widget, così possiamo
+        # scrivere liberamente sulle chiavi dei widget (non ancora istanziati).
+        _step_fields = (
+            "kind", "val", "method", "all_cols", "target_cols", "kind_prev", "per_col"
+        )
+        _pending_del = st.session_state.pop("_pending_delete_step", None)
+        if _pending_del is not None:
+            _nd = st.session_state.get("_n_transforms", 0)
+            for _j in range(_pending_del, _nd - 1):
+                # Shift chiavi fisse
+                for _f in _step_fields:
+                    _src, _dst = f"tr_{_j+1}_{_f}", f"tr_{_j}_{_f}"
+                    if _src in st.session_state:
+                        st.session_state[_dst] = st.session_state[_src]
+                    elif _dst in st.session_state:
+                        del st.session_state[_dst]
+                # Shift chiavi override per-colonna (nomi variabili)
+                for _ok in list(st.session_state.keys()):
+                    if isinstance(_ok, str) and _ok.startswith(f"tr_{_j}_ov_"):
+                        del st.session_state[_ok]
+                for _ok in list(st.session_state.keys()):
+                    if isinstance(_ok, str) and _ok.startswith(f"tr_{_j+1}_ov_"):
+                        st.session_state[f"tr_{_j}_ov_{_ok[len(f'tr_{_j+1}_ov_'):]}"] = st.session_state[_ok]
+            # Rimuovi ultimo step
+            for _f in _step_fields:
+                st.session_state.pop(f"tr_{_nd-1}_{_f}", None)
+            for _ok in list(st.session_state.keys()):
+                if isinstance(_ok, str) and _ok.startswith(f"tr_{_nd-1}_ov_"):
+                    del st.session_state[_ok]
+            st.session_state["_n_transforms"] = max(0, _nd - 1)
+
+        n_tr = st.session_state.get("_n_transforms", 0)
+
+        if n_tr == 0:
+            st.caption("Nessuna trasformazione attiva. Usa '+ Aggiungi' per aggiungere un passo.")
+
+        _tr_kind_opts = list(TRANSFORM_LABELS.keys())
+        # Rimuovi eventuali colonne stale (da un CSV precedente non più presenti)
+        # e usa tutte le colonne disponibili come fallback se non è ancora stato eseguito il plot.
+        _last_y_cols_stored = [
+            c for c in st.session_state.get("_last_y_cols", []) if c in cols
+        ]
+        _last_y_cols = _last_y_cols_stored or [c for c in cols if c not in ("—", x_col)]
+
+        # st.rerun() viene chiamato UNA SOLA VOLTA dopo il loop completo,
+        # così tutti i widget committono il proprio stato prima del rerun.
+        _needs_rerun = False
+
+        for _i in range(n_tr):
+            st.markdown(f"**Passo {_i + 1}**")
+            _tc1, _tc2, _tc3, _tc4 = st.columns([2, 1.5, 1.5, 0.4])
+            with _tc1:
+                _kind = st.selectbox(
+                    "Tipo",
+                    options=_tr_kind_opts,
+                    format_func=lambda k: TRANSFORM_LABELS[k],
+                    key=f"tr_{_i}_kind",
+                    label_visibility="collapsed",
+                )
+            with _tc2:
+                _val_key = f"tr_{_i}_val"
+                _kind_prev_key = f"tr_{_i}_kind_prev"
+                _prev_kind = st.session_state.get(_kind_prev_key)
+                # Reset val al default quando il tipo cambia
+                if _prev_kind is not None and _prev_kind != _kind:
+                    _defaults = {"offset": 0.0, "scale": 1.0, "shift_samples": 0,
+                                 "shift_time": 0.0, "resample": 100.0}
+                    st.session_state[_val_key] = _defaults.get(_kind, 0.0)
+                    for _ok in list(st.session_state.keys()):
+                        if isinstance(_ok, str) and _ok.startswith(f"tr_{_i}_ov_"):
+                            del st.session_state[_ok]
+                st.session_state[_kind_prev_key] = _kind
+                # Pre-inizializza val se assente
+                if _val_key not in st.session_state:
+                    _defaults = {"offset": 0.0, "scale": 1.0, "shift_samples": 0,
+                                 "shift_time": 0.0, "resample": 100.0}
+                    st.session_state[_val_key] = _defaults.get(_kind, 0.0)
+                elif _kind == "resample" and float(st.session_state[_val_key]) <= 0:
+                    st.session_state[_val_key] = 100.0
+
+                if _kind == "offset":
+                    st.number_input("Valore offset", step=0.1,
+                                    key=_val_key, label_visibility="collapsed")
+                elif _kind == "scale":
+                    st.number_input("Fattore moltiplicativo", step=0.1,
+                                    key=_val_key, label_visibility="collapsed")
+                elif _kind == "shift_samples":
+                    st.number_input("Campioni (intero)", step=1,
+                                    key=_val_key, label_visibility="collapsed")
+                elif _kind == "shift_time":
+                    st.number_input("Δt (unità asse X)", step=0.1,
+                                    key=_val_key, label_visibility="collapsed")
+                elif _kind == "resample":
+                    st.number_input("Target fs (Hz)", min_value=0.01, step=1.0,
+                                    key=_val_key, label_visibility="collapsed")
+                else:
+                    st.caption("—")
+            with _tc3:
+                if _kind == "resample":
+                    st.selectbox("Metodo interpolazione",
+                                 options=["linear", "cubic", "nearest"],
+                                 key=f"tr_{_i}_method",
+                                 label_visibility="collapsed")
+                else:
+                    st.empty()
+            with _tc4:
+                if st.button("🗑️", key=f"tr_{_i}_del", help=f"Elimina passo {_i + 1}"):
+                    st.session_state["_pending_delete_step"] = _i
+                    _needs_rerun = True
+
+            # Selettore colonne target
+            _apply_all = True
+            if _last_y_cols:
+                _all_key = f"tr_{_i}_all_cols"
+                if _all_key not in st.session_state:
+                    st.session_state[_all_key] = True
+                _apply_all = st.checkbox("Applica a tutti i segnali", key=_all_key)
+                if not _apply_all:
+                    _target_key = f"tr_{_i}_target_cols"
+                    if _target_key not in st.session_state:
+                        st.session_state[_target_key] = list(_last_y_cols)
+                    else:
+                        _valid = [v for v in st.session_state[_target_key] if v in _last_y_cols]
+                        if _valid != st.session_state[_target_key]:
+                            st.session_state[_target_key] = _valid
+                    st.multiselect(
+                        "Segnali target",
+                        options=_last_y_cols,
+                        key=_target_key,
+                        help="Seleziona i segnali a cui applicare questo passo.",
+                    )
+
+            # Override per-colonna (solo per offset e scale)
+            if _kind in ("offset", "scale") and _last_y_cols:
+                _per_col_key = f"tr_{_i}_per_col"
+                if _per_col_key not in st.session_state:
+                    st.session_state[_per_col_key] = False
+                _per_col = st.checkbox(
+                    "Valori diversi per colonna",
+                    key=_per_col_key,
+                    help="Imposta un valore specifico per ogni segnale selezionato.",
+                )
+                if _per_col:
+                    _cols_for_ov = (
+                        _last_y_cols if _apply_all
+                        else st.session_state.get(f"tr_{_i}_target_cols", _last_y_cols)
+                    )
+                    _global_val = float(st.session_state.get(_val_key, 0.0))
+                    for _oc in _cols_for_ov:
+                        _ov_key = f"tr_{_i}_ov_{_oc}"
+                        if _ov_key not in st.session_state:
+                            st.session_state[_ov_key] = _global_val
+                        _oc1, _oc2 = st.columns([2, 3])
+                        with _oc1:
+                            st.caption(_oc)
+                        with _oc2:
+                            st.number_input(
+                                f"Override {_oc}",
+                                step=0.1,
+                                key=_ov_key,
+                                label_visibility="collapsed",
+                            )
+
+        _btn_col, _ = st.columns([1, 5])
+        with _btn_col:
+            if st.button("+ Aggiungi", disabled=n_tr >= 5, key="tr_btn_add"):
+                st.session_state["_n_transforms"] = n_tr + 1
+                _needs_rerun = True
+
+        if _needs_rerun:
+            st.rerun()
 
     # ---- PRESET CONFIGURAZIONI (FUORI DAL FORM) ----
     with st.expander("Preset Configurazioni", expanded=False):
@@ -1709,6 +2226,7 @@ def main():
 
     if submitted:
         st.session_state["_plots_ready"] = True
+        st.session_state["_last_y_cols"] = y_cols  # usato dal pannello Trasformazioni
         # Pulisci il preset caricato dopo il submit per evitare che rimanga attivo
         st.session_state.pop("_loaded_preset", None)
         st.session_state.pop("_loaded_preset_name", None)
@@ -1721,261 +2239,515 @@ def main():
         st.warning("Seleziona almeno una colonna Y.")
         return
 
-    x_name = x_col if (x_col and x_col != "—") else None
 
-    # Interpolazione X: va applicata PRIMA del ffill globale altrimenti ffill
-    # riempie i NaN della colonna X e l'interpolazione non trova più valori da interpolare.
-    if interpolate_x and x_name and x_name in df.columns:
-        x_nan_mask = df[x_name].isna()
-        n_nan_x = int(x_nan_mask.sum())
-        if n_nan_x > 0:
-            # method='index' usa l'indice intero come asse di interpolazione
-            # → interpolazione lineare tra valori noti, proporzionale al n. di righe
-            df[x_name] = df[x_name].interpolate(method="index")
-            n_residui = int(df[x_name].isna().sum())
-            msg = f"Interpolazione X '{x_name}': {n_nan_x:,} valori interpolati linearmente"
-            if n_residui > 0:
-                msg += f"; {n_residui:,} NaN residui (testa/coda senza riferimento)"
-            msg += "."
-            st.caption(msg)
-        else:
-            st.caption(f"Interpolazione X '{x_name}': nessun NaN da interpolare.")
+    tab_analisi, tab_report = st.tabs(["📊  Analisi", "📋  Report"])
 
-    if fill_missing:
-        nan_before = int(df.isna().sum().sum())
-        df = df.ffill()
-        nan_after = int(df.isna().sum().sum())
-        filled_cells = max(nan_before - nan_after, 0)
-        st.caption(
-            f"Forward fill attivo: {filled_cells:,} celle riempite; NaN residui: {nan_after:,}."
-        )
-    x_values = None
-    if x_name and x_name in df.columns:
-        # cerco di mantenere il tipo più utile possibile
-        if pd.api.types.is_datetime64_any_dtype(df[x_name]) or pd.api.types.is_timedelta64_dtype(df[x_name]):
-            x_values = _to_datetime_flexible(df[x_name])
-        else:
-            # preferisco numerico se coerente
-            xnum = pd.to_numeric(df[x_name], errors="coerce")
-            x_values = xnum if xnum.notna().mean() >= 0.8 else _to_datetime_flexible(df[x_name])
+    with tab_analisi:
+        x_name = x_col if (x_col and x_col != "—") else None
 
-    # Risolvo fs UNA SOLA VOLTA
-    fs_info = resolve_fs(x_values, manual_fs if manual_fs > 0 else None)
-    fs_value = fs_info.value if fs_info.value and fs_info.value > 0 else None
-    if fs_value:
-        source_labels = {
-            "manual": "manuale",
-            "datetime": "stimata da timestamp (mediana Δt)",
-            "index": "stimata su indice (passi consecutivi)",
-        }
-        label = source_labels.get(fs_info.source, fs_info.source)
-        info_lines = [f"fs [Hz]: **{fs_value:.6g}** ({label})"]
-        median_dt = fs_info.details.get("median_dt") if fs_info.details else None
-        if median_dt:
-            unit_label = "s" if fs_info.unit == "seconds" else "step"
-            info_lines.append(f"Δt mediano: {median_dt:.4g} {unit_label}")
-        st.info("  \n".join(info_lines))
-    else:
-        st.warning("fs non disponibile: filtri Butterworth e FFT verranno saltati se richiesti.")
-    for warn in fs_info.warnings:
-        st.warning(warn)
-
-    # Preparo specs
-    kind_map = {
-        "Media mobile (MA)": "ma",
-        "Butterworth LP": "butter_lp",
-        "Butterworth HP": "butter_hp",
-        "Butterworth BP": "butter_bp",
-    }
-    fkind = kind_map[f_kind]
-    cutoff: Optional[Tuple[Optional[float], Optional[float]]] = None
-    lo = _to_float_or_none(f_lo); hi = _to_float_or_none(f_hi)
-    if fkind in ("butter_lp", "butter_hp") and lo is not None:
-        cutoff = (lo, None)
-    elif fkind == "butter_bp" and lo is not None and hi is not None and hi > lo:
-        cutoff = (lo, hi)
-
-    fspec = FilterSpec(
-        kind=fkind,
-        enabled=bool(enable_filter),
-        order=int(f_order),
-        cutoff=cutoff,
-        ma_window=int(ma_win),
-    )
-    fftspec = FFTSpec(enabled=bool(enable_fft), detrend=bool(detrend), window="hann")
-
-    # Salva preset se richiesto
-    pending_save = st.session_state.get("_pending_preset_save")
-    if submitted and pending_save:
-        try:
-            save_preset(
-                name=pending_save["name"],
-                description=pending_save["description"],
-                fspec=fspec,
-                fftspec=fftspec,
-                manual_fs=manual_fs if manual_fs > 0 else None
-            )
-            st.session_state.pop("_pending_preset_save", None)
-            st.session_state["_preset_save_message"] = f"💾 Preset '{pending_save['name']}' salvato con successo!"
-            st.rerun()
-        except PresetError as e:
-            st.error(f"❌ Impossibile salvare preset: {e}")
-            st.session_state.pop("_pending_preset_save", None)
-        except Exception as exc:
-            st.error(f"❌ Errore inatteso salvataggio preset: {exc}")
-            st.session_state.pop("_pending_preset_save", None)
-
-    if fftspec.enabled:
-        if not fs_value:
-            st.warning("FFT disabilitata: fs non disponibile.")
-            fftspec.enabled = False
-        elif not fs_info.is_uniform:
-            detail = '; '.join(fs_info.warnings) if fs_info.warnings else 'campionamento irregolare.'
-            st.warning(f"FFT disabilitata: {detail}")
-            fftspec.enabled = False
-
-    # --- Parse range assi --- #
-    y_for_range = pd.concat([pd.to_numeric(df[c], errors="coerce") for c in y_cols], axis=0)
-    yrange = _parse_range_num(y_min_txt, y_max_txt, y_for_range)
-    xrange = None
-    if x_name and x_values is not None:
-        xrange = _parse_range_x(x_min_txt, x_max_txt, x_values)
-    else:
-        xmin_idx = _to_float_or_none(x_min_txt)
-        xmax_idx = _to_float_or_none(x_max_txt)
-        default_min = 0.0
-        default_max = float(len(df) - 1) if len(df) > 0 else 0.0
-        if xmin_idx is not None or xmax_idx is not None:
-            if xmin_idx is None:
-                xmin_idx = default_min
-            if xmax_idx is None:
-                xmax_idx = default_max
-            if xmin_idx != xmax_idx:
-                xrange = (xmin_idx, xmax_idx)
-
-    quality_mode = st.session_state.get(quality_key, "Alta fedeltà")
-    performance_enabled = quality_mode == "Prestazioni"
-    downsample_cache: dict[tuple[int, Optional[int]], DownsampleResult] = {}
-    downsample_events: List[tuple[str, DownsampleResult]] = []
-    recorded_results: set[int] = set()
-
-    # FIX ISSUE #50: Pre-decima DataFrame UNA volta prima del loop
-    df_plot = df
-    df_downsampled = False
-    downsampled_metadata: Optional[DownsampleResult] = None
-
-    if performance_enabled and total_rows > PERFORMANCE_MAX_POINTS:
-        # Usa prima colonna Y o X per determinare gli indici di decimazione
-        representative_col = y_cols[0] if y_cols else None
-        ds_result: Optional[DownsampleResult] = None
-        if representative_col:
-            y_repr = pd.to_numeric(df[representative_col], errors="coerce")
-            x_repr = x_values if x_values is not None else None
-
-            if y_repr.dropna().empty:
-                st.warning("Downsampling saltato: la serie rappresentativa non ha valori numerici.")
+        # Interpolazione X: va applicata PRIMA del ffill globale altrimenti ffill
+        # riempie i NaN della colonna X e l'interpolazione non trova più valori da interpolare.
+        if interpolate_x and x_name and x_name in df.columns:
+            x_nan_mask = df[x_name].isna()
+            n_nan_x = int(x_nan_mask.sum())
+            if n_nan_x > 0:
+                # method='index' usa l'indice intero come asse di interpolazione
+                # → interpolazione lineare tra valori noti, proporzionale al n. di righe
+                df[x_name] = df[x_name].interpolate(method="index")
+                n_residui = int(df[x_name].isna().sum())
+                msg = f"Interpolazione X '{x_name}': {n_nan_x:,} valori interpolati linearmente"
+                if n_residui > 0:
+                    msg += f"; {n_residui:,} NaN residui (testa/coda senza riferimento)"
+                msg += "."
+                st.caption(msg)
             else:
-                # Calcola indici di downsampling
-                ds_result = downsample_series(
-                    y_repr,
-                    x_repr,
+                st.caption(f"Interpolazione X '{x_name}': nessun NaN da interpolare.")
+
+        if fill_missing:
+            nan_before = int(df.isna().sum().sum())
+            df = df.ffill()
+            nan_after = int(df.isna().sum().sum())
+            filled_cells = max(nan_before - nan_after, 0)
+            st.caption(
+                f"Forward fill attivo: {filled_cells:,} celle riempite; NaN residui: {nan_after:,}."
+            )
+        x_values = None
+        if x_name and x_name in df.columns:
+            # cerco di mantenere il tipo più utile possibile
+            if pd.api.types.is_datetime64_any_dtype(df[x_name]) or pd.api.types.is_timedelta64_dtype(df[x_name]):
+                x_values = _to_datetime_flexible(df[x_name])
+            else:
+                # preferisco numerico se coerente
+                xnum = pd.to_numeric(df[x_name], errors="coerce")
+                x_values = xnum if xnum.notna().mean() >= 0.8 else _to_datetime_flexible(df[x_name])
+
+        # Risolvo fs UNA SOLA VOLTA
+        fs_info = resolve_fs(x_values, manual_fs if manual_fs > 0 else None)
+        fs_value = fs_info.value if fs_info.value and fs_info.value > 0 else None
+        if fs_value:
+            source_labels = {
+                "manual": "manuale",
+                "datetime": "stimata da timestamp (mediana Δt)",
+                "index": "stimata su indice (passi consecutivi)",
+            }
+            label = source_labels.get(fs_info.source, fs_info.source)
+            info_lines = [f"fs [Hz]: **{fs_value:.6g}** ({label})"]
+            median_dt = fs_info.details.get("median_dt") if fs_info.details else None
+            if median_dt:
+                unit_label = "s" if fs_info.unit == "seconds" else "step"
+                info_lines.append(f"Δt mediano: {median_dt:.4g} {unit_label}")
+            st.info("  \n".join(info_lines))
+            # Cache fs info for sidebar live indicator
+            st.session_state["_sidebar_fs_info"] = {"value": fs_value, "label": label}
+        else:
+            st.warning("fs non disponibile: filtri Butterworth e FFT verranno saltati se richiesti.")
+            st.session_state.pop("_sidebar_fs_info", None)
+        for warn in fs_info.warnings:
+            st.warning(warn)
+
+        # Preparo specs
+        kind_map = {
+            "Media mobile (MA)": "ma",
+            "Butterworth LP": "butter_lp",
+            "Butterworth HP": "butter_hp",
+            "Butterworth BP": "butter_bp",
+        }
+        fkind = kind_map[f_kind]
+        cutoff: Optional[Tuple[Optional[float], Optional[float]]] = None
+        lo = _to_float_or_none(f_lo); hi = _to_float_or_none(f_hi)
+        if fkind in ("butter_lp", "butter_hp") and lo is not None:
+            cutoff = (lo, None)
+        elif fkind == "butter_bp" and lo is not None and hi is not None and hi > lo:
+            cutoff = (lo, hi)
+
+        fspec = FilterSpec(
+            kind=fkind,
+            enabled=bool(enable_filter),
+            order=int(f_order),
+            cutoff=cutoff,
+            ma_window=int(ma_win),
+        )
+        fftspec = FFTSpec(enabled=bool(enable_fft), detrend=bool(detrend), window="hann")
+
+        # Raccoglie le TransformSpec configurate nel pannello Trasformazioni
+        _n_tr = int(st.session_state.get("_n_transforms", 0))
+        transform_specs: List[TransformSpec] = []
+        transform_targets: List[set] = []  # set vuoto = tutti i segnali
+        for _ti in range(_n_tr):
+            _tkind = st.session_state.get(f"tr_{_ti}_kind", "offset")
+            _tval = st.session_state.get(f"tr_{_ti}_val")
+            _tval_f = float(_tval) if _tval is not None else 0.0
+            _tmethod = st.session_state.get(f"tr_{_ti}_method", "linear")
+            _tper_col = bool(st.session_state.get(f"tr_{_ti}_per_col", False))
+            _toverrides: Dict[str, float] = {}
+            if _tper_col and _tkind in ("offset", "scale"):
+                for _tok, _tov in list(st.session_state.items()):
+                    if isinstance(_tok, str) and _tok.startswith(f"tr_{_ti}_ov_"):
+                        _toverrides[_tok[len(f"tr_{_ti}_ov_"):]] = float(_tov)
+            if _tkind == "offset":
+                _ts = TransformSpec(kind="offset", constant=_tval_f,
+                                    per_column=_tper_col, per_column_overrides=_toverrides)
+            elif _tkind == "scale":
+                _ts = TransformSpec(kind="scale", constant=_tval_f,
+                                    per_column=_tper_col, per_column_overrides=_toverrides)
+            elif _tkind == "shift_samples":
+                _ts = TransformSpec(kind="shift_samples", shift_samples=int(_tval_f))
+            elif _tkind == "shift_time":
+                _ts = TransformSpec(kind="shift_time", shift_time=_tval_f)
+            elif _tkind == "resample":
+                _ts = TransformSpec(kind="resample", target_fs=_tval_f, interp_method=_tmethod)
+            else:
+                _ts = TransformSpec(kind=_tkind)  # minmax_norm, zscore_norm, derivative, integral
+            transform_specs.append(_ts)
+            # Colonne target: set vuoto = tutti; set non vuoto = solo queste colonne
+            _tapply_all = bool(st.session_state.get(f"tr_{_ti}_all_cols", True))
+            if _tapply_all:
+                transform_targets.append(set())
+            else:
+                _tcols = st.session_state.get(f"tr_{_ti}_target_cols", [])
+                transform_targets.append(set(_tcols))
+
+        # Salva preset se richiesto
+        pending_save = st.session_state.get("_pending_preset_save")
+        if submitted and pending_save:
+            try:
+                save_preset(
+                    name=pending_save["name"],
+                    description=pending_save["description"],
+                    fspec=fspec,
+                    fftspec=fftspec,
+                    manual_fs=manual_fs if manual_fs > 0 else None
+                )
+                st.session_state.pop("_pending_preset_save", None)
+                st.session_state["_preset_save_message"] = f"💾 Preset '{pending_save['name']}' salvato con successo!"
+                st.rerun()
+            except PresetError as e:
+                st.error(f"❌ Impossibile salvare preset: {e}")
+                st.session_state.pop("_pending_preset_save", None)
+            except Exception as exc:
+                st.error(f"❌ Errore inatteso salvataggio preset: {exc}")
+                st.session_state.pop("_pending_preset_save", None)
+
+        if fftspec.enabled:
+            if not fs_value:
+                st.warning("FFT disabilitata: fs non disponibile.")
+                fftspec.enabled = False
+            elif not fs_info.is_uniform:
+                detail = '; '.join(fs_info.warnings) if fs_info.warnings else 'campionamento irregolare.'
+                st.warning(f"FFT disabilitata: {detail}")
+                fftspec.enabled = False
+
+        # --- Parse range assi (da sidebar) --- #
+        _ax_x_min_s = st.session_state.get("ax_x_min", "")
+        _ax_x_max_s = st.session_state.get("ax_x_max", "")
+        _ax_y_mode_s = st.session_state.get("ax_y_mode", "Tutti i segnali")
+
+        y_for_range = pd.concat([pd.to_numeric(df[c], errors="coerce") for c in y_cols], axis=0)
+        _ax_y_min_g = st.session_state.get("ax_y_min_global", "")
+        _ax_y_max_g = st.session_state.get("ax_y_max_global", "")
+        yrange = _parse_range_num(_ax_y_min_g, _ax_y_max_g, y_for_range)
+
+        # Per-column Y ranges dict: {yname: Optional[Tuple]}
+        _yrange_per_col: dict = {}
+        if _ax_y_mode_s == "Per segnale":
+            for _ypc in y_cols:
+                _ypc_key = _ypc.replace(" ", "_").replace(".", "_")
+                _ypc_min = st.session_state.get(f"ax_y_min_{_ypc_key}", "")
+                _ypc_max = st.session_state.get(f"ax_y_max_{_ypc_key}", "")
+                _ypc_data = pd.to_numeric(df[_ypc], errors="coerce")
+                _yrange_per_col[_ypc] = _parse_range_num(_ypc_min, _ypc_max, _ypc_data)
+
+        xrange = None
+        if x_name and x_values is not None:
+            xrange = _parse_range_x(_ax_x_min_s, _ax_x_max_s, x_values)
+        else:
+            xmin_idx = _to_float_or_none(_ax_x_min_s)
+            xmax_idx = _to_float_or_none(_ax_x_max_s)
+            default_min = 0.0
+            default_max = float(len(df) - 1) if len(df) > 0 else 0.0
+            if xmin_idx is not None or xmax_idx is not None:
+                if xmin_idx is None:
+                    xmin_idx = default_min
+                if xmax_idx is None:
+                    xmax_idx = default_max
+                if xmin_idx != xmax_idx:
+                    xrange = (xmin_idx, xmax_idx)
+
+        quality_mode = st.session_state.get(quality_key, "Alta fedeltà")
+        performance_enabled = quality_mode == "Prestazioni"
+        downsample_cache: dict[tuple[int, Optional[int]], DownsampleResult] = {}
+        downsample_events: List[tuple[str, DownsampleResult]] = []
+        recorded_results: set[int] = set()
+
+        # FIX ISSUE #50: Pre-decima DataFrame UNA volta prima del loop
+        df_plot = df
+        df_downsampled = False
+        downsampled_metadata: Optional[DownsampleResult] = None
+
+        if performance_enabled and total_rows > PERFORMANCE_MAX_POINTS:
+            # Usa prima colonna Y o X per determinare gli indici di decimazione
+            representative_col = y_cols[0] if y_cols else None
+            ds_result: Optional[DownsampleResult] = None
+            if representative_col:
+                y_repr = pd.to_numeric(df[representative_col], errors="coerce")
+                x_repr = x_values if x_values is not None else None
+
+                if y_repr.dropna().empty:
+                    st.warning("Downsampling saltato: la serie rappresentativa non ha valori numerici.")
+                else:
+                    # Calcola indici di downsampling
+                    ds_result = downsample_series(
+                        y_repr,
+                        x_repr,
+                        max_points=PERFORMANCE_MAX_POINTS,
+                        method=PERFORMANCE_METHOD,
+                    )
+
+            # Pre-decima DF intero usando gli indici
+            if ds_result and ds_result.sampled_count < total_rows:
+                df_plot = df.iloc[ds_result.indices].copy()
+                df_downsampled = True
+                downsampled_metadata = ds_result
+                st.caption(
+                    f"⚡ Pre-decimazione: {total_rows:,} → {len(df_plot):,} righe "
+                    f"({ds_result.reduction_ratio:.1f}×, {ds_result.method.upper()})"
+                )
+
+        # FIX ISSUE #52: Pre-converti X UNA volta sola (per plot, evita ri-conversioni per ogni Y)
+        # Posizionato DOPO df_plot per accedere sia a df che df_plot
+        x_parsed_plot = _parse_x_column_once(df_plot, x_name)  # Per plot mode (con decimazione)
+        x_parsed_orig = _parse_x_column_once(df, x_name)       # Per FFT (dati originali)
+
+        def _get_series_sources(
+            y_col: str,
+        ) -> tuple[pd.Series, Optional[pd.Series], pd.Series, Optional[pd.Series]]:
+            """Ritorna serie (plot) e serie originale per la colonna richiesta."""
+            series_plot, x_plot = _make_time_series(df_plot, x_name, y_col, x_parsed=x_parsed_plot)
+            if df_downsampled:
+                series_full, x_full = _make_time_series(df, x_name, y_col, x_parsed=x_parsed_orig)
+            else:
+                series_full, x_full = series_plot, x_plot
+            return series_plot, x_plot, series_full, x_full
+
+        def _legend_label(base: str, meta: Optional[DownsampleResult]) -> str:
+            if meta is None or meta.original_count <= meta.sampled_count:
+                return base
+            return f"{base} [down {meta.original_count:,}->{meta.sampled_count:,}]"
+
+        def _prepare_plot_series(
+            label: str,
+            y_data: pd.Series,
+            x_data: Optional[pd.Series],
+            *,
+            reuse_index: Optional[pd.Index] = None,
+        ) -> tuple[Optional[pd.Series], pd.Series, Optional[DownsampleResult]]:
+            if reuse_index is not None:
+                y_sel = y_data.loc[reuse_index]
+                x_sel = x_data.loc[reuse_index] if x_data is not None else None
+                return x_sel, y_sel, None
+
+            # Drop coppie X/Y non valide per evitare linee invisibili
+            y_data, x_data = _mask_xy(y_data, x_data)
+            if y_data.empty:
+                return x_data, y_data, None
+
+            # FIX ISSUE #50: Se DF già pre-decimato, salta downsampling per-series
+            if df_downsampled:
+                return x_data, y_data, downsampled_metadata
+
+            # Fallback: downsampling per-series (legacy, solo se DF NON pre-decimato)
+            if not performance_enabled or len(y_data) <= PERFORMANCE_MAX_POINTS:
+                return x_data, y_data, None
+            cache_key = (id(y_data), id(x_data) if x_data is not None else None)
+            result = downsample_cache.get(cache_key)
+            if result is None:
+                result = downsample_series(
+                    y_data,
+                    x_data,
                     max_points=PERFORMANCE_MAX_POINTS,
                     method=PERFORMANCE_METHOD,
                 )
+                downsample_cache[cache_key] = result
+            if result.original_count > result.sampled_count and id(result) not in recorded_results:
+                downsample_events.append((label, result))
+                recorded_results.add(id(result))
+            return result.x, result.y, result
 
-        # Pre-decima DF intero usando gli indici
-        if ds_result and ds_result.sampled_count < total_rows:
-            df_plot = df.iloc[ds_result.indices].copy()
-            df_downsampled = True
-            downsampled_metadata = ds_result
-            st.caption(
-                f"⚡ Pre-decimazione: {total_rows:,} → {len(df_plot):,} righe "
-                f"({ds_result.reduction_ratio:.1f}×, {ds_result.method.upper()})"
+        # ========================= PLOT ========================= #
+        if mode == "Sovrapposto":
+            # ----- UNICA FIGURA CON TUTTE LE SERIE ----- #
+            combined = go.Figure()
+            x_label = x_name if x_name else "Index"
+            _tr_series_for_fft: Dict[str, Tuple[pd.Series, Optional[pd.Series]]] = {}
+
+            for yname in y_cols:
+                series_plot, x_plot, series_full, x_full = _get_series_sources(yname)
+                series_orig, x_orig = series_full, x_full  # per overlay "originale" (pre-trasformazione)
+
+                # Applica pipeline trasformazioni (prima del filtro) — solo spec applicabili a questa colonna
+                _col_specs = [s for s, t in zip(transform_specs, transform_targets) if not t or yname in t]
+                if _col_specs:
+                    try:
+                        _tr_y, _tr_x, _, _tr_changed = _apply_transform_pipeline_cached(
+                            series_full, x_full, _col_specs, fs_info, file_sig, yname, fill_stamp
+                        )
+                        series_full = _tr_y
+                        x_full = _tr_x
+                        if _tr_changed:
+                            series_plot = _tr_y
+                            x_plot = _tr_x
+                        else:
+                            series_plot = _tr_y.reindex(series_plot.index)
+                            x_plot = _tr_x.reindex(x_plot.index) if _tr_x is not None and x_plot is not None else _tr_x
+                    except ValueError as _e:
+                        st.warning(f"Trasformazione non applicata a '{yname}': {_e}")
+                _tr_series_for_fft[yname] = (series_full, x_full)
+
+                series = series_plot
+                x_ser = x_plot
+                if series.dropna().empty:
+                    st.info(f"'{yname}': nessun dato numerico valido.")
+                    continue
+
+                # Filtro (se attivo)
+                y_filt_full: Optional[pd.Series] = None
+                y_filt_plot: Optional[pd.Series] = None
+                ok, msg = validate_filter_spec(fspec, fs_value)
+                if fspec.enabled and not ok:
+                    st.warning(f"Filtro non applicato a {yname}: {msg}")
+                    y_plot = series
+                else:
+                    if fspec.enabled:
+                        y_filt_full = _apply_filter_cached(
+                            series_full,
+                            x_full,
+                            fspec,
+                            fs_value,
+                            fs_info.source,
+                            file_sig,
+                            yname,
+                            fill_stamp,
+                        )
+                        if y_filt_full is None:
+                            st.warning(f"Filtro non applicato a {yname}: errore nel calcolo.")
+                            y_plot = series
+                        else:
+                            y_filt_plot = y_filt_full.reindex(series.index)
+                            y_plot = y_filt_plot
+                    else:
+                        y_plot = series
+
+                name_main = yname + (" (filtrato)" if (fspec.enabled and not overlay_orig) else "")
+                x_main, y_main, main_meta = _prepare_plot_series(name_main, y_plot, x_ser)
+                if y_main.empty:
+                    st.info(f"'{yname}': nessun dato valido dopo la rimozione dei NaN.")
+                    continue
+
+                # Originale tratteggiato se richiesto (usa serie pre-trasformazione)
+                if overlay_orig and fspec.enabled and y_filt_plot is not None:
+                    overlay_label = f"{yname} (originale)"
+                    reuse_idx = y_main.index if main_meta and main_meta.original_count > main_meta.sampled_count else None
+                    x_overlay_src = x_orig if x_orig is not None else x_ser
+                    x_overlay, y_overlay, overlay_meta = _prepare_plot_series(
+                        overlay_label,
+                        series_orig,
+                        x_overlay_src,
+                        reuse_index=reuse_idx,
+                    )
+                    if not y_overlay.empty:
+                        combined.add_trace(
+                            go.Scatter(
+                                x=(x_overlay if x_overlay is not None else None),
+                                y=y_overlay,
+                                mode="lines",
+                            name=_legend_label(overlay_label, overlay_meta or main_meta),
+                            line=dict(width=1, dash="dot"),
+                        )
+                    )
+
+                # Traccia principale (filtrato o originale)
+                if not y_main.empty:
+                    combined.add_trace(
+                        go.Scatter(
+                            x=(x_main if x_main is not None else None),
+                            y=y_main,
+                            mode="lines",
+                            name=_legend_label(name_main, main_meta),
+                        )
+                    )
+                if overlay_orig and fspec.enabled and y_filt_plot is not None:
+                    combined.data = combined.data[::-1]
+
+            combined.update_layout(
+                title="Confronto sovrapposto",
+                xaxis_title=x_label,
+                yaxis_title="Valore",
+                template="plotly_dark",
+                paper_bgcolor="#020617",
+                plot_bgcolor="#0a1628",
+                legend_title="Serie",
+                margin=dict(l=50, r=30, t=60, b=50),
             )
+            if yrange:
+                combined.update_yaxes(range=yrange)
+            if xrange:
+                combined.update_xaxes(range=xrange)
 
-    # FIX ISSUE #52: Pre-converti X UNA volta sola (per plot, evita ri-conversioni per ogni Y)
-    # Posizionato DOPO df_plot per accedere sia a df che df_plot
-    x_parsed_plot = _parse_x_column_once(df_plot, x_name)  # Per plot mode (con decimazione)
-    x_parsed_orig = _parse_x_column_once(df, x_name)       # Per FFT (dati originali)
+            _plotly_chart(st, combined)
 
-    def _get_series_sources(
-        y_col: str,
-    ) -> tuple[pd.Series, Optional[pd.Series], pd.Series, Optional[pd.Series]]:
-        """Ritorna serie (plot) e serie originale per la colonna richiesta."""
-        series_plot, x_plot = _make_time_series(df_plot, x_name, y_col, x_parsed=x_parsed_plot)
-        if df_downsampled:
-            series_full, x_full = _make_time_series(df, x_name, y_col, x_parsed=x_parsed_orig)
-        else:
-            series_full, x_full = series_plot, x_plot
-        return series_plot, x_plot, series_full, x_full
+            # FFT: una per serie, sotto
+            if fftspec.enabled:
+                for yname in y_cols:
+                    # FIX ISSUE #50: FFT usa dati ORIGINALI (non decimati), non df_plot
+                    # FIX ISSUE #52: Passa X pre-parsato originale
+                    # Se trasformazioni attive, usa la serie trasformata già calcolata nel loop sopra
+                    _tr_full = _tr_series_for_fft.get(yname)
+                    if _tr_full is not None:
+                        series, x_ser = _tr_full
+                    else:
+                        series, x_ser = _make_time_series(df, x_name, yname, x_parsed=x_parsed_orig)
+                    if series.dropna().empty:
+                        continue
+                    y_filt = None
+                    if fspec.enabled:
+                        y_filt = _apply_filter_cached(
+                            series,
+                            x_ser,
+                            fspec,
+                            fs_value,
+                            fs_info.source,
+                            file_sig,
+                            yname,
+                            fill_stamp,
+                        )
+                    y_fft = y_filt if (fspec.enabled and y_filt is not None and fft_use == "Filtrato (se attivo)") else series
+                    if not fs_value or fs_value <= 0:
+                        st.warning(f"FFT non calcolata per {yname}: fs non disponibile.")
+                    elif not fs_info.is_uniform:
+                        detail = "; ".join(fs_info.warnings) if fs_info.warnings else "campionamento irregolare."
+                        st.warning(f"FFT non calcolata per {yname}: {detail}")
+                    else:
+                        is_filt = fspec.enabled and y_filt is not None and fft_use == "Filtrato (se attivo)"
+                        freqs, amp = _compute_fft_cached(
+                            y_fft,
+                            fs_value,
+                            fs_info.source,
+                            fftspec,
+                            file_sig,
+                            yname,
+                            is_filt,
+                            fill_stamp,
+                            fspec,
+                        )
+                        if freqs.size == 0:
+                            st.info(f"FFT non calcolabile per {yname} (serie troppo corta o parametri non validi).")
+                        else:
+                            _plotly_chart(
+                                st,
+                                _plot_fft(freqs, amp, title=f"FFT — {yname}"),
+                            )
 
-    def _legend_label(base: str, meta: Optional[DownsampleResult]) -> str:
-        if meta is None or meta.original_count <= meta.sampled_count:
-            return base
-        return f"{base} [down {meta.original_count:,}->{meta.sampled_count:,}]"
+        elif mode == "Separati":
+            # ----- UNA TAB PER SERIE ----- #
+            tabs = st.tabs(y_cols)
+            for idx, yname in enumerate(y_cols):
+                series_plot, x_plot, series_full, x_full = _get_series_sources(yname)
+                series_orig, x_orig = series_full, x_full  # per overlay pre-trasformazione
 
-    def _prepare_plot_series(
-        label: str,
-        y_data: pd.Series,
-        x_data: Optional[pd.Series],
-        *,
-        reuse_index: Optional[pd.Index] = None,
-    ) -> tuple[Optional[pd.Series], pd.Series, Optional[DownsampleResult]]:
-        if reuse_index is not None:
-            y_sel = y_data.loc[reuse_index]
-            x_sel = x_data.loc[reuse_index] if x_data is not None else None
-            return x_sel, y_sel, None
+                # Applica pipeline trasformazioni (prima del filtro) — solo spec applicabili a questa colonna
+                _col_specs = [s for s, t in zip(transform_specs, transform_targets) if not t or yname in t]
+                if _col_specs:
+                    try:
+                        _tr_y, _tr_x, _, _tr_changed = _apply_transform_pipeline_cached(
+                            series_full, x_full, _col_specs, fs_info, file_sig, yname, fill_stamp
+                        )
+                        series_full = _tr_y
+                        x_full = _tr_x
+                        if _tr_changed:
+                            series_plot = _tr_y
+                            x_plot = _tr_x
+                        else:
+                            series_plot = _tr_y.reindex(series_plot.index)
+                            x_plot = _tr_x.reindex(x_plot.index) if _tr_x is not None and x_plot is not None else _tr_x
+                    except ValueError as _e:
+                        tabs[idx].warning(f"Trasformazione non applicata a '{yname}': {_e}")
 
-        # Drop coppie X/Y non valide per evitare linee invisibili
-        y_data, x_data = _mask_xy(y_data, x_data)
-        if y_data.empty:
-            return x_data, y_data, None
+                series = series_plot
+                x_ser = x_plot
+                host = tabs[idx]
 
-        # FIX ISSUE #50: Se DF già pre-decimato, salta downsampling per-series
-        if df_downsampled:
-            return x_data, y_data, downsampled_metadata
+                if series.dropna().empty:
+                    host.info(f"'{yname}': nessun dato numerico valido.")
+                    continue
 
-        # Fallback: downsampling per-series (legacy, solo se DF NON pre-decimato)
-        if not performance_enabled or len(y_data) <= PERFORMANCE_MAX_POINTS:
-            return x_data, y_data, None
-        cache_key = (id(y_data), id(x_data) if x_data is not None else None)
-        result = downsample_cache.get(cache_key)
-        if result is None:
-            result = downsample_series(
-                y_data,
-                x_data,
-                max_points=PERFORMANCE_MAX_POINTS,
-                method=PERFORMANCE_METHOD,
-            )
-            downsample_cache[cache_key] = result
-        if result.original_count > result.sampled_count and id(result) not in recorded_results:
-            downsample_events.append((label, result))
-            recorded_results.add(id(result))
-        return result.x, result.y, result
-
-    # ========================= PLOT ========================= #
-    if mode == "Sovrapposto":
-        # ----- UNICA FIGURA CON TUTTE LE SERIE ----- #
-        combined = go.Figure()
-        x_label = x_name if x_name else "Index"
-
-        for yname in y_cols:
-            series_plot, x_plot, series_full, x_full = _get_series_sources(yname)
-            series = series_plot
-            x_ser = x_plot
-            if series.dropna().empty:
-                st.info(f"'{yname}': nessun dato numerico valido.")
-                continue
-
-            # Filtro (se attivo)
-            y_filt_full: Optional[pd.Series] = None
-            y_filt_plot: Optional[pd.Series] = None
-            ok, msg = validate_filter_spec(fspec, fs_value)
-            if fspec.enabled and not ok:
-                st.warning(f"Filtro non applicato a {yname}: {msg}")
-                y_plot = series
-            else:
-                if fspec.enabled:
+                # Filtro
+                y_filt_full: Optional[pd.Series] = None
+                y_filt_plot: Optional[pd.Series] = None
+                ok, msg = validate_filter_spec(fspec, fs_value)
+                if fspec.enabled and not ok:
+                    host.warning(f"Filtro non applicato a {yname}: {msg}")
+                    y_plot = series
+                elif fspec.enabled:
                     y_filt_full = _apply_filter_cached(
                         series_full,
                         x_full,
@@ -1987,7 +2759,7 @@ def main():
                         fill_stamp,
                     )
                     if y_filt_full is None:
-                        st.warning(f"Filtro non applicato a {yname}: errore nel calcolo.")
+                        host.warning(f"Filtro non applicato a {yname}: errore nel calcolo.")
                         y_plot = series
                     else:
                         y_filt_plot = y_filt_full.reindex(series.index)
@@ -1995,171 +2767,153 @@ def main():
                 else:
                     y_plot = series
 
-            name_main = yname + (" (filtrato)" if (fspec.enabled and not overlay_orig) else "")
-            x_main, y_main, main_meta = _prepare_plot_series(name_main, y_plot, x_ser)
-            if y_main.empty:
-                st.info(f"'{yname}': nessun dato valido dopo la rimozione dei NaN.")
-                continue
-
-            # Originale tratteggiato se richiesto
-            if overlay_orig and fspec.enabled and y_filt_plot is not None:
-                overlay_label = f"{yname} (originale)"
-                reuse_idx = y_main.index if main_meta and main_meta.original_count > main_meta.sampled_count else None
-                x_overlay_src = x_full if x_full is not None else x_ser
-                x_overlay, y_overlay, overlay_meta = _prepare_plot_series(
-                    overlay_label,
-                    series_full,
-                    x_overlay_src,
-                    reuse_index=reuse_idx,
-                )
-                if not y_overlay.empty:
-                    combined.add_trace(
-                        go.Scatter(
-                            x=(x_overlay if x_overlay is not None else None),
-                            y=y_overlay,
-                            mode="lines",
-                        name=_legend_label(overlay_label, overlay_meta or main_meta),
-                        line=dict(width=1, dash="dot"),
-                    )
-                )
-
-            # Traccia principale (filtrato o originale)
-            if not y_main.empty:
-                combined.add_trace(
-                    go.Scatter(
-                        x=(x_main if x_main is not None else None),
-                        y=y_main,
-                        mode="lines",
-                        name=_legend_label(name_main, main_meta),
-                    )
-                )
-            if overlay_orig and fspec.enabled and y_filt_plot is not None:
-                combined.data = combined.data[::-1]
-
-        combined.update_layout(
-            title="Confronto sovrapposto",
-            xaxis_title=x_label,
-            yaxis_title="Valore",
-            template="plotly_white",
-            legend_title="Serie",
-            margin=dict(l=50, r=30, t=60, b=50),
-        )
-        if yrange:
-            combined.update_yaxes(range=yrange)
-        if xrange:
-            combined.update_xaxes(range=xrange)
-
-        _plotly_chart(st, combined)
-
-        # FFT: una per serie, sotto
-        if fftspec.enabled:
-            for yname in y_cols:
-                # FIX ISSUE #50: FFT usa dati ORIGINALI (non decimati), non df_plot
-                # FIX ISSUE #52: Passa X pre-parsato originale
-                series, x_ser = _make_time_series(df, x_name, yname, x_parsed=x_parsed_orig)
-                if series.dropna().empty:
+                display_name = yname + (" (filtrato)" if (fspec.enabled and not overlay_orig) else "")
+                x_plot, y_plot_ds, main_meta = _prepare_plot_series(display_name, y_plot, x_ser)
+                if y_plot_ds.empty:
+                    host.info(f"'{yname}': nessun dato valido dopo la rimozione dei NaN.")
                     continue
-                y_filt = None
-                if fspec.enabled:
-                    y_filt = _apply_filter_cached(
-                        series,
-                        x_ser,
-                        fspec,
-                        fs_value,
-                        fs_info.source,
-                        file_sig,
-                        yname,
-                        fill_stamp,
+                fig = _plot_xy(x_plot, y_plot_ds, name=display_name)
+                if fig.data:
+                    fig.data[0].name = _legend_label(display_name, main_meta)
+                _this_yrange = (_yrange_per_col.get(yname) if _ax_y_mode_s == "Per segnale" else None) or yrange
+                if _this_yrange:
+                    fig.update_yaxes(range=_this_yrange)
+                if xrange:
+                    fig.update_xaxes(range=xrange)
+                if overlay_orig and fspec.enabled and y_filt_plot is not None:
+                    overlay_label = f"{yname} (originale)"
+                    reuse_idx = y_plot_ds.index if main_meta and main_meta.original_count > main_meta.sampled_count else None
+                    x_overlay_src = x_orig if x_orig is not None else x_ser
+                    x_overlay, y_overlay, overlay_meta = _prepare_plot_series(
+                        overlay_label,
+                        series_orig,
+                        x_overlay_src,
+                        reuse_index=reuse_idx,
                     )
-                y_fft = y_filt if (fspec.enabled and y_filt is not None and fft_use == "Filtrato (se attivo)") else series
-                if not fs_value or fs_value <= 0:
-                    st.warning(f"FFT non calcolata per {yname}: fs non disponibile.")
-                elif not fs_info.is_uniform:
-                    detail = "; ".join(fs_info.warnings) if fs_info.warnings else "campionamento irregolare."
-                    st.warning(f"FFT non calcolata per {yname}: {detail}")
-                else:
-                    is_filt = fspec.enabled and y_filt_full is not None and fft_use == "Filtrato (se attivo)"
-                    freqs, amp = _compute_fft_cached(
-                        y_fft,
-                        fs_value,
-                        fs_info.source,
-                        fftspec,
-                        file_sig,
-                        yname,
-                        is_filt,
-                        fill_stamp,
-                    )
-                    if freqs.size == 0:
-                        st.info(f"FFT non calcolabile per {yname} (serie troppo corta o parametri non validi).")
-                    else:
-                        _plotly_chart(
-                            st,
-                            _plot_fft(freqs, amp, title=f"FFT — {yname}"),
+                    if not y_overlay.empty:
+                        fig.add_trace(
+                            go.Scatter(
+                                x=x_overlay if x_overlay is not None else None,
+                                y=y_overlay,
+                                mode="lines",
+                                name=_legend_label(overlay_label, overlay_meta or main_meta),
+                                line=dict(width=1, dash="dot"),
+                            )
                         )
+                        fig.data = fig.data[::-1]
+                _plotly_chart(host, fig)
 
-    elif mode == "Separati":
-        # ----- UNA TAB PER SERIE ----- #
-        tabs = st.tabs(y_cols)
-        for idx, yname in enumerate(y_cols):
-            series_plot, x_plot, series_full, x_full = _get_series_sources(yname)
-            series = series_plot
-            x_ser = x_plot
-            host = tabs[idx]
+                # FFT per singola serie
+                if fftspec.enabled:
+                    if fspec.enabled and y_filt_full is not None and fft_use == "Filtrato (se attivo)":
+                        y_fft = y_filt_full
+                    else:
+                        y_fft = series_full
+                    if not fs_value or fs_value <= 0:
+                        host.warning(f"FFT non calcolata per {yname}: fs non disponibile.")
+                    elif not fs_info.is_uniform:
+                        detail = "; ".join(fs_info.warnings) if fs_info.warnings else "campionamento irregolare."
+                        host.warning(f"FFT non calcolata per {yname}: {detail}")
+                    else:
+                        is_filt = fspec.enabled and y_filt_full is not None and fft_use == "Filtrato (se attivo)"
+                        freqs, amp = _compute_fft_cached(
+                            y_fft,
+                            fs_value,
+                            fs_info.source,
+                            fftspec,
+                            file_sig,
+                            yname,
+                            is_filt,
+                            fill_stamp,
+                            fspec,
+                        )
+                        if freqs.size == 0:
+                            host.info(f"FFT non calcolabile per {yname} (serie troppo corta o parametri non validi).")
+                        else:
+                            _plotly_chart(
+                                host,
+                                _plot_fft(freqs, amp, title=f"FFT — {yname}"),
+                            )
 
-            if series.dropna().empty:
-                host.info(f"'{yname}': nessun dato numerico valido.")
-                continue
+        else:
+            # ----- CASCATA: grafici uno sotto l'altro ----- #
+            for yname in y_cols:
+                series_plot, x_plot, series_full, x_full = _get_series_sources(yname)
+                series_orig, x_orig = series_full, x_full  # per overlay pre-trasformazione
 
-            # Filtro
-            y_filt_full: Optional[pd.Series] = None
-            y_filt_plot: Optional[pd.Series] = None
-            ok, msg = validate_filter_spec(fspec, fs_value)
-            if fspec.enabled and not ok:
-                host.warning(f"Filtro non applicato a {yname}: {msg}")
-                y_plot = series
-            elif fspec.enabled:
-                y_filt_full = _apply_filter_cached(
-                    series_full,
-                    x_full,
-                    fspec,
-                    fs_value,
-                    fs_info.source,
-                    file_sig,
-                    yname,
-                    fill_stamp,
-                )
-                if y_filt_full is None:
-                    host.warning(f"Filtro non applicato a {yname}: errore nel calcolo.")
+                # Applica pipeline trasformazioni (prima del filtro) — solo spec applicabili a questa colonna
+                _col_specs = [s for s, t in zip(transform_specs, transform_targets) if not t or yname in t]
+                if _col_specs:
+                    try:
+                        _tr_y, _tr_x, _, _tr_changed = _apply_transform_pipeline_cached(
+                            series_full, x_full, _col_specs, fs_info, file_sig, yname, fill_stamp
+                        )
+                        series_full = _tr_y
+                        x_full = _tr_x
+                        if _tr_changed:
+                            series_plot = _tr_y
+                            x_plot = _tr_x
+                        else:
+                            series_plot = _tr_y.reindex(series_plot.index)
+                            x_plot = _tr_x.reindex(x_plot.index) if _tr_x is not None and x_plot is not None else _tr_x
+                    except ValueError as _e:
+                        st.warning(f"Trasformazione non applicata a '{yname}': {_e}")
+
+                series = series_plot
+                x_ser = x_plot
+
+                if series.dropna().empty:
+                    st.info(f"'{yname}': nessun dato numerico valido.")
+                    continue
+
+                # Filtro
+                y_filt_full: Optional[pd.Series] = None
+                y_filt_plot: Optional[pd.Series] = None
+                ok, msg = validate_filter_spec(fspec, fs_value)
+                if fspec.enabled and not ok:
+                    st.warning(f"Filtro non applicato a {yname}: {msg}")
                     y_plot = series
                 else:
-                    y_filt_plot = y_filt_full.reindex(series.index)
-                    y_plot = y_filt_plot
-            else:
-                y_plot = series
+                    if fspec.enabled:
+                        y_filt_full = _apply_filter_cached(
+                            series_full,
+                            x_full,
+                            fspec,
+                            fs_value,
+                            fs_info.source,
+                            file_sig,
+                            yname,
+                            fill_stamp,
+                        )
+                        if y_filt_full is None:
+                            st.warning(f"Filtro non applicato a {yname}: errore nel calcolo.")
+                            y_plot = series
+                        else:
+                            y_filt_plot = y_filt_full.reindex(series.index)
+                            y_plot = y_filt_plot
+                    else:
+                        y_plot = series
 
-            display_name = yname + (" (filtrato)" if (fspec.enabled and not overlay_orig) else "")
-            x_plot, y_plot_ds, main_meta = _prepare_plot_series(display_name, y_plot, x_ser)
-            if y_plot_ds.empty:
-                host.info(f"'{yname}': nessun dato valido dopo la rimozione dei NaN.")
-                continue
-            fig = _plot_xy(x_plot, y_plot_ds, name=display_name)
-            if fig.data:
-                fig.data[0].name = _legend_label(display_name, main_meta)
-            if yrange:
-                fig.update_yaxes(range=yrange)
-            if xrange:
-                fig.update_xaxes(range=xrange)
-            if overlay_orig and fspec.enabled and y_filt_plot is not None:
-                overlay_label = f"{yname} (originale)"
-                reuse_idx = y_plot_ds.index if main_meta and main_meta.original_count > main_meta.sampled_count else None
-                x_overlay_src = x_full if x_full is not None else x_ser
-                x_overlay, y_overlay, overlay_meta = _prepare_plot_series(
-                    overlay_label,
-                    series_full,
-                    x_overlay_src,
-                    reuse_index=reuse_idx,
-                )
-                if not y_overlay.empty:
+                display_name = yname + (" (filtrato)" if (fspec.enabled and not overlay_orig) else "")
+                x_plot, y_plot_ds, main_meta = _prepare_plot_series(display_name, y_plot, x_ser)
+                fig = _plot_xy(x_plot, y_plot_ds, name=display_name)
+                if fig.data:
+                    fig.data[0].name = _legend_label(display_name, main_meta)
+                _this_yrange = (_yrange_per_col.get(yname) if _ax_y_mode_s == "Per segnale" else None) or yrange
+                if _this_yrange:
+                    fig.update_yaxes(range=_this_yrange)
+                if xrange:
+                    fig.update_xaxes(range=xrange)
+                if overlay_orig and fspec.enabled and y_filt_plot is not None:
+                    overlay_label = f"{yname} (originale)"
+                    reuse_idx = y_plot_ds.index if main_meta and main_meta.original_count > main_meta.sampled_count else None
+                    x_overlay_src = x_orig if x_orig is not None else x_ser
+                    x_overlay, y_overlay, overlay_meta = _prepare_plot_series(
+                        overlay_label,
+                        series_orig,
+                        x_overlay_src,
+                        reuse_index=reuse_idx,
+                    )
                     fig.add_trace(
                         go.Scatter(
                             x=x_overlay if x_overlay is not None else None,
@@ -2170,395 +2924,357 @@ def main():
                         )
                     )
                     fig.data = fig.data[::-1]
-            _plotly_chart(host, fig)
+                _plotly_chart(st, fig)
 
-            # FFT per singola serie
-            if fftspec.enabled:
-                if fspec.enabled and y_filt_full is not None and fft_use == "Filtrato (se attivo)":
-                    y_fft = y_filt_full
-                else:
-                    y_fft = series_full
-                if not fs_value or fs_value <= 0:
-                    host.warning(f"FFT non calcolata per {yname}: fs non disponibile.")
-                elif not fs_info.is_uniform:
-                    detail = "; ".join(fs_info.warnings) if fs_info.warnings else "campionamento irregolare."
-                    host.warning(f"FFT non calcolata per {yname}: {detail}")
-                else:
-                    is_filt = fspec.enabled and y_filt_full is not None and fft_use == "Filtrato (se attivo)"
-                    freqs, amp = _compute_fft_cached(
-                        y_fft,
-                        fs_value,
-                        fs_info.source,
-                        fftspec,
-                        file_sig,
-                        yname,
-                        is_filt,
-                        fill_stamp,
-                    )
-                    if freqs.size == 0:
-                        host.info(f"FFT non calcolabile per {yname} (serie troppo corta o parametri non validi).")
+                # FFT sotto ogni grafico (se attiva)
+                if fftspec.enabled:
+                    if fspec.enabled and y_filt_full is not None and fft_use == "Filtrato (se attivo)":
+                        y_fft = y_filt_full
                     else:
-                        _plotly_chart(
-                            host,
-                            _plot_fft(freqs, amp, title=f"FFT — {yname}"),
+                        y_fft = series_full
+                    if not fs_value or fs_value <= 0:
+                        st.warning(f"FFT non calcolata per {yname}: fs non disponibile.")
+                    elif not fs_info.is_uniform:
+                        detail = "; ".join(fs_info.warnings) if fs_info.warnings else "campionamento irregolare."
+                        st.warning(f"FFT non calcolata per {yname}: {detail}")
+                    else:
+                        is_filt = fspec.enabled and y_filt_full is not None and fft_use == "Filtrato (se attivo)"
+                        freqs, amp = _compute_fft_cached(
+                            y_fft,
+                            fs_value,
+                            fs_info.source,
+                            fftspec,
+                            file_sig,
+                            yname,
+                            is_filt,
+                            fill_stamp,
+                            fspec,
                         )
+                        if freqs.size == 0:
+                            st.info(f"FFT non calcolabile per {yname} (serie troppo corta o parametri non validi).")
+                        else:
+                            _plotly_chart(
+                                st,
+                                _plot_fft(freqs, amp, title=f"FFT — {yname}"),
+                            )
 
-    else:
-        # ----- CASCATA: grafici uno sotto l'altro ----- #
-        for yname in y_cols:
-            series_plot, x_plot, series_full, x_full = _get_series_sources(yname)
-            series = series_plot
-            x_ser = x_plot
-
-            if series.dropna().empty:
-                st.info(f"'{yname}': nessun dato numerico valido.")
-                continue
-
-            # Filtro
-            y_filt_full: Optional[pd.Series] = None
-            y_filt_plot: Optional[pd.Series] = None
-            ok, msg = validate_filter_spec(fspec, fs_value)
-            if fspec.enabled and not ok:
-                st.warning(f"Filtro non applicato a {yname}: {msg}")
-                y_plot = series
-            else:
-                if fspec.enabled:
-                    y_filt_full = _apply_filter_cached(
-                        series_full,
-                        x_full,
-                        fspec,
-                        fs_value,
-                        fs_info.source,
-                        file_sig,
-                        yname,
-                        fill_stamp,
-                    )
-                    if y_filt_full is None:
-                        st.warning(f"Filtro non applicato a {yname}: errore nel calcolo.")
-                        y_plot = series
-                    else:
-                        y_filt_plot = y_filt_full.reindex(series.index)
-                        y_plot = y_filt_plot
-                else:
-                    y_plot = series
-
-            display_name = yname + (" (filtrato)" if (fspec.enabled and not overlay_orig) else "")
-            x_plot, y_plot_ds, main_meta = _prepare_plot_series(display_name, y_plot, x_ser)
-            fig = _plot_xy(x_plot, y_plot_ds, name=display_name)
-            if fig.data:
-                fig.data[0].name = _legend_label(display_name, main_meta)
-            if yrange:
-                fig.update_yaxes(range=yrange)
-            if xrange:
-                fig.update_xaxes(range=xrange)
-            if overlay_orig and fspec.enabled and y_filt_plot is not None:
-                overlay_label = f"{yname} (originale)"
-                reuse_idx = y_plot_ds.index if main_meta and main_meta.original_count > main_meta.sampled_count else None
-                x_overlay_src = x_full if x_full is not None else x_ser
-                x_overlay, y_overlay, overlay_meta = _prepare_plot_series(
-                    overlay_label,
-                    series_full,
-                    x_overlay_src,
-                    reuse_index=reuse_idx,
+        if performance_enabled:
+            summaries: List[str] = []
+            seen_pairs: set[tuple[str, int]] = set()
+            for label, res in downsample_events:
+                key = (label, res.sampled_count)
+                if res.original_count <= res.sampled_count or key in seen_pairs:
+                    continue
+                seen_pairs.add(key)
+                summaries.append(
+                    f"{label}: {res.original_count:,}->{res.sampled_count:,} ({res.reduction_ratio:.1f}x)"
                 )
-                fig.add_trace(
-                    go.Scatter(
-                        x=x_overlay if x_overlay is not None else None,
-                        y=y_overlay,
-                        mode="lines",
-                        name=_legend_label(overlay_label, overlay_meta or main_meta),
-                        line=dict(width=1, dash="dot"),
-                    )
-                )
-                fig.data = fig.data[::-1]
-            _plotly_chart(st, fig)
+            if summaries:
+                st.caption("Prestazioni attive (LTTB): " + " · ".join(summaries))
 
-            # FFT sotto ogni grafico (se attiva)
-            if fftspec.enabled:
-                if fspec.enabled and y_filt_full is not None and fft_use == "Filtrato (se attivo)":
-                    y_fft = y_filt_full
-                else:
-                    y_fft = series_full
-                if not fs_value or fs_value <= 0:
-                    st.warning(f"FFT non calcolata per {yname}: fs non disponibile.")
-                elif not fs_info.is_uniform:
-                    detail = "; ".join(fs_info.warnings) if fs_info.warnings else "campionamento irregolare."
-                    st.warning(f"FFT non calcolata per {yname}: {detail}")
-                else:
-                    is_filt = fspec.enabled and y_filt_full is not None and fft_use == "Filtrato (se attivo)"
-                    freqs, amp = _compute_fft_cached(
-                        y_fft,
-                        fs_value,
-                        fs_info.source,
-                        fftspec,
-                        file_sig,
-                        yname,
-                        is_filt,
-                        fill_stamp,
-                    )
-                    if freqs.size == 0:
-                        st.info(f"FFT non calcolabile per {yname} (serie troppo corta o parametri non validi).")
-                    else:
-                        _plotly_chart(
-                            st,
-                            _plot_fft(freqs, amp, title=f"FFT — {yname}"),
-                        )
-
-    if performance_enabled:
-        summaries: List[str] = []
-        seen_pairs: set[tuple[str, int]] = set()
-        for label, res in downsample_events:
-            key = (label, res.sampled_count)
-            if res.original_count <= res.sampled_count or key in seen_pairs:
-                continue
-            seen_pairs.add(key)
-            summaries.append(
-                f"{label}: {res.original_count:,}->{res.sampled_count:,} ({res.reduction_ratio:.1f}x)"
-            )
-        if summaries:
-            st.caption("Prestazioni attive (LTTB): " + " · ".join(summaries))
-
-    # FIX ISSUE #55: Log cache hit rate dopo plot
-    filter_total = CACHE_STATS["filter_hits"] + CACHE_STATS["filter_misses"]
-    fft_total = CACHE_STATS["fft_hits"] + CACHE_STATS["fft_misses"]
-    if filter_total > 0 or fft_total > 0:
-        filter_hit_rate = (CACHE_STATS["filter_hits"] / filter_total * 100) if filter_total > 0 else 0
-        fft_hit_rate = (CACHE_STATS["fft_hits"] / fft_total * 100) if fft_total > 0 else 0
-        logger.info(
-            "Cache hit rate",
-            extra={
-                "filter_hits": CACHE_STATS["filter_hits"],
-                "filter_misses": CACHE_STATS["filter_misses"],
-                "filter_hit_rate": f"{filter_hit_rate:.1f}%",
-                "fft_hits": CACHE_STATS["fft_hits"],
-                "fft_misses": CACHE_STATS["fft_misses"],
-                "fft_hit_rate": f"{fft_hit_rate:.1f}%",
-                "session_id": st.session_state.get("_dataset_id", "")[:8]
-            }
-        )
-
-    # ---- Report ----
-    st.divider()
-    st.subheader("Report statistici")
-    col_r1, col_r2 = st.columns([1, 2])
-    with col_r1:
-        fmt = st.selectbox(
-            "Formato",
-            ["csv", "csv+md", "csv+html", "csv+md+html"],
-            index=0,
-            key="report_format",
-        )
-        base_name = st.text_input(
-            "Nome base report (opzionale)",
-            placeholder="es. report_misura_001",
-            key="report_base_name",
-        )
-    with col_r2:
-        st.write("")  # spacer per allineare il pulsante
-        if st.button("Genera report"):
-            try:
-                manager = ReportManager()
-                out_paths = manager.generate_report(
-                    df, x_name, y_cols, formats=fmt, base_name=base_name or None
-                )
-                mime_map = {
-                    "csv": "text/csv",
-                    "md": "text/markdown",
-                    "html": "text/html",
+        # FIX ISSUE #55: Log cache hit rate dopo plot
+        filter_total = CACHE_STATS["filter_hits"] + CACHE_STATS["filter_misses"]
+        fft_total = CACHE_STATS["fft_hits"] + CACHE_STATS["fft_misses"]
+        if filter_total > 0 or fft_total > 0:
+            filter_hit_rate = (CACHE_STATS["filter_hits"] / filter_total * 100) if filter_total > 0 else 0
+            fft_hit_rate = (CACHE_STATS["fft_hits"] / fft_total * 100) if fft_total > 0 else 0
+            logger.info(
+                "Cache hit rate",
+                extra={
+                    "filter_hits": CACHE_STATS["filter_hits"],
+                    "filter_misses": CACHE_STATS["filter_misses"],
+                    "filter_hit_rate": f"{filter_hit_rate:.1f}%",
+                    "fft_hits": CACHE_STATS["fft_hits"],
+                    "fft_misses": CACHE_STATS["fft_misses"],
+                    "fft_hit_rate": f"{fft_hit_rate:.1f}%",
+                    "session_id": st.session_state.get("_dataset_id", "")[:8]
                 }
-                downloads = {}
-                for fmt_name, path in out_paths.items():
-                    if path and path.exists():
-                        downloads[fmt_name] = {
-                            "path": path,
-                            "bytes": path.read_bytes(),
-                            "mime": mime_map.get(fmt_name, "application/octet-stream"),
+            )
+
+
+    with tab_report:
+        # ---- Report ----
+        st.divider()
+        st.subheader("Report statistici")
+
+        # Costruisce il DataFrame per il report: originale o con trasformazioni applicate.
+        # Le colonne per cui la trasformazione cambia la lunghezza (derivata, resample)
+        # vengono mantenute originali con un avviso.
+        _df_report = df
+        if transform_specs:
+            _rpt_use_tr = st.checkbox(
+                "Usa dati trasformati nel report",
+                value=True,
+                help="Applica le trasformazioni configurate prima di calcolare statistiche e grafici.",
+            )
+            if _rpt_use_tr:
+                _df_report = df.copy()
+                _rpt_skipped: List[str] = []
+                for _ryn in [c for c in _df_report.columns if c != x_name]:
+                    _rspecs = [
+                        s for s, t in zip(transform_specs, transform_targets)
+                        if not t or _ryn in t
+                    ]
+                    if not _rspecs:
+                        continue
+                    _rx_r = _df_report[x_name] if x_name and x_name in _df_report.columns else None
+                    try:
+                        _rtr_y, _, _, _rtr_chg = _apply_transform_pipeline_cached(
+                            _df_report[_ryn], _rx_r, _rspecs, fs_info, file_sig, _ryn, fill_stamp
+                        )
+                        if _rtr_chg:
+                            _rpt_skipped.append(_ryn)
+                        else:
+                            _df_report[_ryn] = _rtr_y
+                    except ValueError:
+                        _rpt_skipped.append(_ryn)
+                if _rpt_skipped:
+                    st.info(
+                        "Le seguenti colonne usano i dati originali nel report "
+                        "(la trasformazione ne modifica la lunghezza del segnale): "
+                        + ", ".join(_rpt_skipped)
+                    )
+
+        # Slice X: filtra _df_report allo stesso intervallo mostrato nel grafico.
+        # Usa x_values (già convertito a numerico/datetime) per costruire la maschera,
+        # così si evita il confronto dtype=str vs float sulla colonna originale.
+        if xrange is not None:
+            try:
+                if x_values is not None:
+                    _xmask = (x_values >= xrange[0]) & (x_values <= xrange[1])
+                elif x_name and x_name in _df_report.columns:
+                    _xf = pd.to_numeric(_df_report[x_name], errors="coerce")
+                    _xmask = (_xf >= xrange[0]) & (_xf <= xrange[1])
+                else:
+                    _idx_s = _df_report.index.to_series()
+                    _xmask = (_idx_s >= xrange[0]) & (_idx_s <= xrange[1])
+                _df_report = _df_report.loc[_xmask.values].reset_index(drop=True)
+                st.caption(
+                    f"Report calcolato sull'intervallo X [{xrange[0]}, {xrange[1]}]"
+                    f" — {len(_df_report)} righe."
+                )
+            except Exception:
+                pass
+
+        col_r1, col_r2 = st.columns([1, 2])
+        with col_r1:
+            fmt = st.selectbox(
+                "Formato",
+                ["csv", "csv+md", "csv+html", "csv+md+html"],
+                index=0,
+                key="report_format",
+            )
+            base_name = st.text_input(
+                "Nome base report (opzionale)",
+                placeholder="es. report_misura_001",
+                key="report_base_name",
+            )
+        with col_r2:
+            st.write("")  # spacer per allineare il pulsante
+            if st.button("Genera report"):
+                try:
+                    manager = ReportManager()
+                    out_paths = manager.generate_report(
+                        _df_report, x_name, y_cols, formats=fmt, base_name=base_name or None
+                    )
+                    mime_map = {
+                        "csv": "text/csv",
+                        "md": "text/markdown",
+                        "html": "text/html",
+                    }
+                    downloads = {}
+                    for fmt_name, path in out_paths.items():
+                        if path and path.exists():
+                            downloads[fmt_name] = {
+                                "path": path,
+                                "bytes": path.read_bytes(),
+                                "mime": mime_map.get(fmt_name, "application/octet-stream"),
+                            }
+                    st.session_state["_generated_report"] = {
+                        "outputs": out_paths,
+                        "downloads": downloads,
+                    }
+                    st.session_state.pop("_generated_report_error", None)
+                except Exception as e:
+                    # FIX ISSUE #54: Messaggio generico utente, log tecnico con traceback
+                    st.session_state.pop("_generated_report", None)
+                    st.session_state["_generated_report_error"] = "Errore nella generazione del report."
+                    logger.error(
+                        "Report generation failed",
+                        exc_info=True,
+                        extra={
+                            "formats": fmt,
+                            "columns": len(df.columns),
+                            "rows": len(df),
+                            "session_id": st.session_state.get("_dataset_id", "")[:8]
                         }
-                st.session_state["_generated_report"] = {
-                    "outputs": out_paths,
-                    "downloads": downloads,
-                }
-                st.session_state.pop("_generated_report_error", None)
-            except Exception as e:
-                # FIX ISSUE #54: Messaggio generico utente, log tecnico con traceback
-                st.session_state.pop("_generated_report", None)
-                st.session_state["_generated_report_error"] = "Errore nella generazione del report."
-                logger.error(
-                    "Report generation failed",
-                    exc_info=True,
-                    extra={
-                        "formats": fmt,
-                        "columns": len(df.columns),
-                        "rows": len(df),
-                        "session_id": st.session_state.get("_dataset_id", "")[:8]
-                    }
-                )
-
-    report_error = st.session_state.get("_generated_report_error")
-    if report_error:
-        st.error(f"Generazione report fallita: {report_error}")
-    generated_report = st.session_state.get("_generated_report")
-    if generated_report:
-        st.success("Report generato.")
-        outputs = generated_report.get("outputs", {})
-        st.json({k: str(v) if v else None for k, v in outputs.items()})
-        downloads = generated_report.get("downloads", {})
-        for fmt_name, info in downloads.items():
-            st.download_button(
-                f"Scarica {fmt_name.upper()}",
-                data=info["bytes"],
-                file_name=info["path"].name,
-                mime=info["mime"],
-                key=f"download_report_{fmt_name}",
-            )
-
-    st.divider()
-    st.subheader("Report visivo dei grafici")
-    st.caption("Scegli fino a 4 serie per creare un'immagine o un PDF con i grafici in cascata.")
-
-    visual_default = y_cols[: min(4, len(y_cols))] if y_cols else cols[: min(4, len(cols))]
-    visual_raw_selection = st.multiselect(
-        "Serie da includere (max 4)",
-        options=cols,
-        default=visual_default,
-        help="Le serie devono essere numeriche; eventuali NaN verranno ignorati.",
-    )
-
-    if len(visual_raw_selection) > 4:
-        st.warning("Puoi selezionare al massimo 4 serie: verranno considerate solo le prime quattro.")
-
-    visual_selection = visual_raw_selection[:4]
-
-    default_x_label = x_name if x_name else "Index"
-    prev_default = st.session_state.get("_visual_report_last_default_x_label")
-    _sync_visual_spec_state(visual_selection, default_x_label)
-    if prev_default is not None and prev_default != default_x_label:
-        for col in visual_selection:
-            key = _visual_spec_key("xlabel", col)
-            if st.session_state.get(key) == prev_default:
-                st.session_state[key] = default_x_label
-    st.session_state["_visual_report_last_default_x_label"] = default_x_label
-
-    visual_specs: List[VisualPlotSpec] = []
-    for idx, yname in enumerate(visual_selection):
-        title_key = _visual_spec_key("title", yname)
-        xlabel_key = _visual_spec_key("xlabel", yname)
-        ylabel_key = _visual_spec_key("ylabel", yname)
-        with st.expander(
-            f"Grafico {idx + 1} — {yname}",
-            expanded=False,
-        ):
-            plot_title = st.text_input("Titolo grafico", key=title_key)
-            x_label = st.text_input("Titolo asse X", key=xlabel_key)
-            y_label = st.text_input("Titolo asse Y", key=ylabel_key)
-        visual_specs.append(
-            VisualPlotSpec(
-                y_column=yname,
-                title=plot_title or None,
-                x_label=x_label or None,
-                y_label=y_label or None,
-            )
-        )
-
-    col_vis1, col_vis2 = st.columns([2, 1])
-    with col_vis1:
-        visual_title = st.text_input("Titolo report visivo", key="vis_report_main_title")
-        visual_base = st.text_input("Nome file (opzionale)", placeholder="es. report_visivo", key="vis_report_base")
-    with col_vis2:
-        visual_format = st.radio(
-            "Formato",
-            ["html"],
-            #["png", "pdf", "html"], <-- Per eliminare "pdf" e "png" in cloud (Plotly non supporta più l'export in questi formati)
-            horizontal=True,
-            key="vis_report_format",
-        )
-        visual_show_legend = st.checkbox("Mostra legenda", value=False, key="vis_report_legend")
-
-    btn_col1, btn_col2, btn_col3 = st.columns([1, 1, 2])
-    with btn_col2:
-        generate_visual = _button("Genera report visivo")
-
-    if generate_visual:
-        if not visual_specs:
-            st.warning("Seleziona almeno una serie per il report visivo.")
-        else:
-            try:
-                with st.spinner("Generazione report visivo..."):
-                    manager = VisualReportManager()
-                    result = manager.generate_report(
-                        df=df,
-                        specs=visual_specs,
-                        x_column=x_name,
-                        title=visual_title or "", #modifica per eliminare "udefined" su report html quando titolo vuoto
-                        base_name=visual_base or None,
-                        file_format=visual_format,
-                        show_legend=visual_show_legend,
-                        x_range=xrange,
-                        y_range=yrange,
                     )
-                st.session_state["_generated_visual_report"] = result
-                st.session_state.pop("_generated_visual_report_error", None)
-            except Exception as e:
-                # FIX ISSUE #54: Messaggio generico utente, log tecnico con traceback
-                st.session_state.pop("_generated_visual_report", None)
-                st.session_state["_generated_visual_report_error"] = "Errore nella generazione del report visivo."
-                logger.error(
-                    "Visual report generation failed",
-                    exc_info=True,
-                    extra={
-                        "format": visual_format,
-                        "num_series": len(visual_specs),
-                        "columns": [spec["column"] for spec in visual_specs],
-                        "session_id": st.session_state.get("_dataset_id", "")[:8]
-                    }
+
+        report_error = st.session_state.get("_generated_report_error")
+        if report_error:
+            st.error(f"Generazione report fallita: {report_error}")
+        generated_report = st.session_state.get("_generated_report")
+        if generated_report:
+            st.success("Report generato.")
+            outputs = generated_report.get("outputs", {})
+            st.json({k: str(v) if v else None for k, v in outputs.items()})
+            downloads = generated_report.get("downloads", {})
+            for fmt_name, info in downloads.items():
+                st.download_button(
+                    f"Scarica {fmt_name.upper()}",
+                    data=info["bytes"],
+                    file_name=info["path"].name,
+                    mime=info["mime"],
+                    key=f"download_report_{fmt_name}",
                 )
 
-    visual_error = st.session_state.get("_generated_visual_report_error")
-    if visual_error:
-        st.error(f"Generazione report visivo fallita: {visual_error}")
-    visual_result = st.session_state.get("_generated_visual_report")
-    if visual_result:
-        actual_format = visual_result["format"]
-        requested_format = visual_result.get("requested_format", actual_format)
-        fallback_reason = visual_result.get("fallback_reason")
+        st.divider()
+        st.subheader("Report visivo dei grafici")
+        st.caption("Scegli fino a 4 serie per creare un'immagine o un PDF con i grafici in cascata.")
 
-        st.success(f"Report visivo salvato in {visual_result['path']}")
-        if requested_format != actual_format:
-            warning_msg = (
-                f"Il formato {requested_format.upper()} non è disponibile in questo ambiente. "
-                f"Il report è stato esportato come {actual_format.upper()}."
-            )
-            st.warning(warning_msg)
-            if fallback_reason:
-                st.caption(f"Dettagli: {fallback_reason}")
-
-        if actual_format == "pdf":
-            mime = "application/pdf"
-        elif actual_format == "html":
-            mime = "text/html"
-        else:
-            mime = "image/png"
-        st.download_button(
-            "Scarica report",
-            data=visual_result["bytes"],
-            file_name=visual_result["path"].name,
-            mime=mime,
-            key="download_visual_report",
+        visual_default = y_cols[: min(4, len(y_cols))] if y_cols else cols[: min(4, len(cols))]
+        visual_raw_selection = st.multiselect(
+            "Serie da includere (max 4)",
+            options=cols,
+            default=visual_default,
+            help="Le serie devono essere numeriche; eventuali NaN verranno ignorati.",
         )
-        if actual_format == "png":
-            _image(visual_result["bytes"], caption="Anteprima report visivo")
-        elif actual_format == "html":
-            st.info("Anteprima interattiva generata in formato HTML.")
-            _plotly_chart(st, visual_result["figure"], key="visual_report_preview")
 
-    st.divider()
-    with st.expander("ℹ️ Info rilevate (clicca per espandere)", expanded=False):
-        st.json(meta)
+        if len(visual_raw_selection) > 4:
+            st.warning("Puoi selezionare al massimo 4 serie: verranno considerate solo le prime quattro.")
 
-    # Footer: mostra loader type
-    loader_emoji = "🚀" if LOADER_TYPE == "optimized" else "📦"
-    loader_desc = "Ottimizzato (chunked)" if LOADER_TYPE == "optimized" else "Standard"
-    st.caption(f"{loader_emoji} Loader: {loader_desc}")
+        visual_selection = visual_raw_selection[:4]
+
+        default_x_label = x_name if x_name else "Index"
+        prev_default = st.session_state.get("_visual_report_last_default_x_label")
+        _sync_visual_spec_state(visual_selection, default_x_label)
+        if prev_default is not None and prev_default != default_x_label:
+            for col in visual_selection:
+                key = _visual_spec_key("xlabel", col)
+                if st.session_state.get(key) == prev_default:
+                    st.session_state[key] = default_x_label
+        st.session_state["_visual_report_last_default_x_label"] = default_x_label
+
+        visual_specs: List[VisualPlotSpec] = []
+        for idx, yname in enumerate(visual_selection):
+            title_key = _visual_spec_key("title", yname)
+            xlabel_key = _visual_spec_key("xlabel", yname)
+            ylabel_key = _visual_spec_key("ylabel", yname)
+            with st.expander(
+                f"Grafico {idx + 1} — {yname}",
+                expanded=False,
+            ):
+                plot_title = st.text_input("Titolo grafico", key=title_key)
+                x_label = st.text_input("Titolo asse X", key=xlabel_key)
+                y_label = st.text_input("Titolo asse Y", key=ylabel_key)
+            visual_specs.append(
+                VisualPlotSpec(
+                    y_column=yname,
+                    title=plot_title or None,
+                    x_label=x_label or None,
+                    y_label=y_label or None,
+                )
+            )
+
+        col_vis1, col_vis2 = st.columns([2, 1])
+        with col_vis1:
+            visual_title = st.text_input("Titolo report visivo", key="vis_report_main_title")
+            visual_base = st.text_input("Nome file (opzionale)", placeholder="es. report_visivo", key="vis_report_base")
+        with col_vis2:
+            visual_format = st.radio(
+                "Formato",
+                ["html"],
+                #["png", "pdf", "html"], <-- Per eliminare "pdf" e "png" in cloud (Plotly non supporta più l'export in questi formati)
+                horizontal=True,
+                key="vis_report_format",
+            )
+            visual_show_legend = st.checkbox("Mostra legenda", value=False, key="vis_report_legend")
+
+        btn_col1, btn_col2, btn_col3 = st.columns([1, 1, 2])
+        with btn_col2:
+            generate_visual = _button("Genera report visivo")
+
+        if generate_visual:
+            if not visual_specs:
+                st.warning("Seleziona almeno una serie per il report visivo.")
+            else:
+                try:
+                    with st.spinner("Generazione report visivo..."):
+                        manager = VisualReportManager()
+                        result = manager.generate_report(
+                            df=_df_report,
+                            specs=visual_specs,
+                            x_column=x_name,
+                            title=visual_title or "", #modifica per eliminare "udefined" su report html quando titolo vuoto
+                            base_name=visual_base or None,
+                            file_format=visual_format,
+                            show_legend=visual_show_legend,
+                            x_range=xrange,
+                            y_range=yrange,
+                        )
+                    st.session_state["_generated_visual_report"] = result
+                    st.session_state.pop("_generated_visual_report_error", None)
+                except Exception as e:
+                    # FIX ISSUE #54: Messaggio generico utente, log tecnico con traceback
+                    st.session_state.pop("_generated_visual_report", None)
+                    st.session_state["_generated_visual_report_error"] = "Errore nella generazione del report visivo."
+                    logger.error(
+                        "Visual report generation failed",
+                        exc_info=True,
+                        extra={
+                            "format": visual_format,
+                            "num_series": len(visual_specs),
+                            "columns": [spec["column"] for spec in visual_specs],
+                            "session_id": st.session_state.get("_dataset_id", "")[:8]
+                        }
+                    )
+
+        visual_error = st.session_state.get("_generated_visual_report_error")
+        if visual_error:
+            st.error(f"Generazione report visivo fallita: {visual_error}")
+        visual_result = st.session_state.get("_generated_visual_report")
+        if visual_result:
+            actual_format = visual_result["format"]
+            requested_format = visual_result.get("requested_format", actual_format)
+            fallback_reason = visual_result.get("fallback_reason")
+
+            st.success(f"Report visivo salvato in {visual_result['path']}")
+            if requested_format != actual_format:
+                warning_msg = (
+                    f"Il formato {requested_format.upper()} non è disponibile in questo ambiente. "
+                    f"Il report è stato esportato come {actual_format.upper()}."
+                )
+                st.warning(warning_msg)
+                if fallback_reason:
+                    st.caption(f"Dettagli: {fallback_reason}")
+
+            if actual_format == "pdf":
+                mime = "application/pdf"
+            elif actual_format == "html":
+                mime = "text/html"
+            else:
+                mime = "image/png"
+            st.download_button(
+                "Scarica report",
+                data=visual_result["bytes"],
+                file_name=visual_result["path"].name,
+                mime=mime,
+                key="download_visual_report",
+            )
+            if actual_format == "png":
+                _image(visual_result["bytes"], caption="Anteprima report visivo")
+            elif actual_format == "html":
+                st.info("Anteprima interattiva generata in formato HTML.")
+                _plotly_chart(st, visual_result["figure"], key="visual_report_preview")
+
+        st.divider()
+        with st.expander("ℹ️ Info rilevate (clicca per espandere)", expanded=False):
+            st.json(meta)
+
+        # Footer: mostra loader type
+        loader_emoji = "🚀" if LOADER_TYPE == "optimized" else "📦"
+        loader_desc = "Ottimizzato (chunked)" if LOADER_TYPE == "optimized" else "Standard"
+        st.caption(f"{loader_emoji} Loader: {loader_desc}")
 
 
 if __name__ == "__main__":
