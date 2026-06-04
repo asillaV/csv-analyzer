@@ -27,6 +27,11 @@ datas = [
     ("config_web.json", "."),
     ("assets", "assets"),
     (".streamlit", ".streamlit"),
+    # Sorgente del pacchetto 'core' incluso come dato in _internal/core/.
+    # Streamlit esegue _internal/web_app.py e inserisce _internal in sys.path,
+    # quindi 'import core.*' si risolve dal filesystem anche se per qualche
+    # motivo gli hidden import non venissero impacchettati nel PYZ.
+    ("core", "core"),
     # NB: la cartella 'presets/' NON va inclusa: in modalità frozen i preset di
     # default vengono rigenerati in %APPDATA% da create_default_presets().
 ]
@@ -84,7 +89,9 @@ for _pkg in ("plotly", "altair"):
 
 a = Analysis(
     ["run_app.py"],
-    pathex=[],
+    # Root del progetto nel search path: senza questo gli hidden import 'core.*'
+    # raccolti da collect_submodules non vengono trovati e finiscono scartati.
+    pathex=[SPECPATH],
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
