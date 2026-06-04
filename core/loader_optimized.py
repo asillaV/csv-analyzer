@@ -39,8 +39,7 @@ ENABLE_PARALLEL = False  # Richiede multiprocessing, può causare problemi con S
 
 
 def _load_config() -> Dict:
-    """Carica configurazione da config.json con fallback a defaults"""
-    import json
+    """Carica configurazione dalla config effettiva (default + override utente)."""
     defaults = {
         "chunked_loading_threshold_mb": _DEFAULT_SIZE_THRESHOLD_MB,
         "chunk_size": _DEFAULT_CHUNK_SIZE,
@@ -48,17 +47,17 @@ def _load_config() -> Dict:
         "sample_size": _DEFAULT_SAMPLE_SIZE,
     }
     try:
-        with open("config.json", "r") as f:
-            config = json.load(f)
-            perf_config = config.get("performance", {})
-            return {
-                "chunked_loading_threshold_mb": perf_config.get("chunked_loading_threshold_mb", defaults["chunked_loading_threshold_mb"]),
-                "chunk_size": perf_config.get("chunk_size", defaults["chunk_size"]),
-                "rows_threshold": perf_config.get("rows_threshold", defaults["rows_threshold"]),
-                "sample_size": perf_config.get("sample_size", defaults["sample_size"]),
-            }
+        from core.settings import effective_config
+
+        perf_config = effective_config().get("performance", {})
+        return {
+            "chunked_loading_threshold_mb": perf_config.get("chunked_loading_threshold_mb", defaults["chunked_loading_threshold_mb"]),
+            "chunk_size": perf_config.get("chunk_size", defaults["chunk_size"]),
+            "rows_threshold": perf_config.get("rows_threshold", defaults["rows_threshold"]),
+            "sample_size": perf_config.get("sample_size", defaults["sample_size"]),
+        }
     except Exception as e:
-        log.warning(f"Could not load config.json, using defaults: {e}")
+        log.warning(f"Could not load effective config, using defaults: {e}")
         return defaults
 
 

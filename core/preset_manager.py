@@ -12,13 +12,14 @@ from dataclasses import asdict
 from datetime import datetime
 
 from core.signal_tools import FilterSpec, FFTSpec
+from core.paths import presets_dir
 
 
 # Schema version per compatibilità futura
 PRESET_VERSION = "1.0"
 
-# Directory per i preset
-PRESETS_DIR = Path(__file__).parent.parent / "presets"
+# Directory per i preset (scrivibile: %APPDATA% se frozen, root progetto da sorgente)
+PRESETS_DIR = presets_dir()
 
 
 class PresetError(Exception):

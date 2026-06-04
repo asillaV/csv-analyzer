@@ -6,6 +6,8 @@ from pathlib import Path
 from datetime import datetime
 from typing import Optional
 
+from core.paths import logs_dir
+
 
 class LogManager:
     """
@@ -27,21 +29,14 @@ class LogManager:
         self._ensure_configured()
 
     @classmethod
-    def _project_root(cls) -> Path:
-        # .../core/logger.py -> project_root = parent of 'core'
-        return Path(__file__).resolve().parents[1]
-
-    @classmethod
     def _ensure_configured(cls) -> None:
         if cls._configured:
             return
 
-        project_root = cls._project_root()
-        logs_dir = project_root / "logs"
-        logs_dir.mkdir(parents=True, exist_ok=True)
+        log_dir = logs_dir()
 
         log_name = f"analizzatore_{datetime.now():%Y%m%d}.log"
-        cls._logfile_path = logs_dir / log_name
+        cls._logfile_path = log_dir / log_name
 
         base_logger = logging.getLogger(cls._base_logger_name)
         base_logger.setLevel(logging.INFO)

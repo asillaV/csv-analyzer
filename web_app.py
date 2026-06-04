@@ -24,14 +24,14 @@ import streamlit as st
 
 from core.analyzer import analyze_csv
 from core.csv_cleaner import CleaningReport
+from core.paths import resource_path
+from core import settings as app_settings
 
 # Import condizionale: usa loader ottimizzato se configurato
 import json
 _use_optimized = True  # Default
 try:
-    with open("config.json") as f:
-        _config = json.load(f)
-        _use_optimized = _config.get("performance", {}).get("use_optimized_loader", True)
+    _use_optimized = app_settings.effective_config().get("performance", {}).get("use_optimized_loader", True)
 except Exception:
     pass
 
@@ -126,22 +126,19 @@ LIMIT_DEFAULTS = {
 }
 
 
-@lru_cache(maxsize=1)
 def _load_limits_config() -> Dict[str, float]:
-    """Legge i limiti di caricamento da config.json con fallback sicuri."""
-    import json
+    """Legge i limiti dalla config effettiva (default + override utente).
 
+    Letta fresca ad ogni chiamata: gli override salvati dall'utente nel pannello
+    Impostazioni hanno effetto immediato sul prossimo caricamento.
+    """
     merged: Dict[str, float] = dict(LIMIT_DEFAULTS)
-    config_path = Path("config.json")
     try:
-        if config_path.exists():
-            with open(config_path, "r", encoding="utf-8") as handle:
-                data = json.load(handle)
-                limits = data.get("limits") or {}
-                for key, default in LIMIT_DEFAULTS.items():
-                    value = limits.get(key)
-                    if isinstance(value, (int, float)):
-                        merged[key] = float(value)
+        limits = app_settings.effective_config().get("limits") or {}
+        for key in LIMIT_DEFAULTS:
+            value = limits.get(key)
+            if isinstance(value, (int, float)):
+                merged[key] = float(value)
     except Exception:
         # In caso di problemi con il file di config, manteniamo i default.
         pass
@@ -295,7 +292,7 @@ def _parse_csv_with_timeout(file_bytes: bytes, apply_cleaning: bool, timeout_s: 
             tmp_path.unlink(missing_ok=True)
         except OSError:
             pass
-SAMPLE_CSV_PATH = Path("assets/sample_timeseries.csv")
+SAMPLE_CSV_PATH = resource_path("assets/sample_timeseries.csv")
 
 # Cache limits
 MAX_FILTER_CACHE_SIZE = 32
@@ -571,6 +568,7 @@ def _reset_all_settings() -> None:
     # Reset preset state
     st.session_state.pop("_loaded_preset", None)
     st.session_state.pop("_loaded_preset_name", None)
+    st.session_state.pop("_active_preset_name", None)
     st.session_state.pop("_pending_preset_save", None)
 
     # Reset pannello trasformazioni (passi individuali + pending action)
@@ -871,8 +869,7 @@ def _plot_fft(freqs: np.ndarray, amp: np.ndarray, title: str = "FFT") -> go.Figu
 
 # ---------------------- Quality checks ---------------------- #
 def _load_quality_config() -> Dict[str, Any]:
-    """Load quality check configuration from config.json with safe defaults."""
-    import json
+    """Load quality check configuration from effective config (default + override)."""
     defaults = {
         "gap_factor_k": 5.0,
         "spike_z": 4.0,
@@ -880,32 +877,21 @@ def _load_quality_config() -> Dict[str, Any]:
         "max_examples": 5
     }
     try:
-        config_path = Path("config.json")
-        if config_path.exists():
-            with open(config_path, 'r') as f:
-                config = json.load(f)
-                return config.get("quality", defaults)
+        return app_settings.effective_config().get("quality", defaults)
     except Exception:
-        pass
-    return defaults
+        return defaults
 
 
 def _load_performance_config() -> Dict[str, Any]:
-    """Load performance configuration from config.json with safe defaults."""
-    import json
+    """Load performance configuration from effective config (default + override)."""
     defaults = {
         "optimize_dtypes": True,
         "aggressive_dtype_optimization": False
     }
     try:
-        config_path = Path("config.json")
-        if config_path.exists():
-            with open(config_path, 'r') as f:
-                config = json.load(f)
-                return config.get("performance", defaults)
+        return app_settings.effective_config().get("performance", defaults)
     except Exception:
-        pass
-    return defaults
+        return defaults
 
 
 def _render_quality_badge_and_details(report: DataQualityReport) -> None:
@@ -914,11 +900,11 @@ def _render_quality_badge_and_details(report: DataQualityReport) -> None:
     if report.status == 'ok':
         badge_color = "#28a745"
         badge_text = "OK"
-        badge_icon = "✓"
+        badge_icon = ""
     else:
         badge_color = "#ffc107"
         badge_text = "Attenzione"
-        badge_icon = "⚠"
+        badge_icon = ""
 
     # Count issues
     issue_count = len(report.issues)
@@ -943,7 +929,7 @@ def _render_quality_badge_and_details(report: DataQualityReport) -> None:
 
     # Details panel - NEVER auto-expand
     if report.has_issues() or report.notes:
-        with st.expander("📋 Dettagli qualità", expanded=False):
+        with st.expander("Dettagli qualità", expanded=False):
             # Configuration info
             st.markdown("**Configurazione controlli:**")
             config_cols = st.columns(3)
@@ -970,17 +956,17 @@ def _render_quality_badge_and_details(report: DataQualityReport) -> None:
 
             # Notes
             if report.notes:
-                st.markdown("**ℹ️ Note informative:**")
+                st.markdown("**Note informative:**")
                 for note in report.notes:
                     st.info(note)
 
             # Issues
             if report.has_issues():
-                st.markdown("**⚠️ Problemi rilevati:**")
+                st.markdown("**Problemi rilevati:**")
                 for idx, issue in enumerate(report.issues, 1):
                     with st.container():
                         if issue.issue_type == 'x_non_monotonic':
-                            st.markdown(f"**{idx}. 🔴 X non monotono**")
+                            st.markdown(f"**{idx}. X non monotono**")
                             st.markdown(
                                 f"- **Violazioni:** {issue.count} ({issue.percentage:.2f}% dei punti)\n"
                                 f"- **Descrizione:** L'asse X contiene valori duplicati o decrescenti"
@@ -997,7 +983,7 @@ def _render_quality_badge_and_details(report: DataQualityReport) -> None:
                         elif issue.issue_type == 'x_gap':
                             median_dt = issue.details.get('median_dt', 'n/a')
                             k = issue.details.get('gap_factor_k', 'n/a')
-                            st.markdown(f"**{idx}. 🟡 Gap nel campionamento**")
+                            st.markdown(f"**{idx}. Gap nel campionamento**")
                             st.markdown(
                                 f"- **Gap rilevati:** {issue.count} ({issue.percentage:.2f}% degli intervalli)\n"
                                 f"- **Δt mediano:** {median_dt:.4g} unità\n"
@@ -1017,7 +1003,7 @@ def _render_quality_badge_and_details(report: DataQualityReport) -> None:
                             mad = issue.details.get('mad', 'n/a')
                             spike_z = issue.details.get('spike_z', 'n/a')
                             col_name = issue.column or 'n/a'
-                            st.markdown(f"**{idx}. 🔵 Spike in '{col_name}'**")
+                            st.markdown(f"**{idx}. Spike in '{col_name}'**")
                             st.markdown(
                                 f"- **Outlier rilevati:** {issue.count} ({issue.percentage:.2f}% dei punti)\n"
                                 f"- **Mediana:** {median_y:.4g}\n"
@@ -1321,10 +1307,269 @@ def _sync_visual_spec_state(selection: Sequence[str], default_x_label: str) -> N
             st.session_state[ylabel_key] = col
 
 
-def main():
-    _ensure_session_id()
-    st.set_page_config(page_title="Analizzatore CSV - Web", layout="wide")
+def _apply_preset_to_widgets(preset_data: Dict[str, Any]) -> None:
+    """Scrive i valori di un preset nelle chiavi dei widget della sidebar.
 
+    DEVE essere chiamata PRIMA che i widget vengano creati nel run corrente
+    (Streamlit vieta di modificare la session_state di un widget già istanziato).
+    """
+    filter_kind_options = [
+        "Media mobile (MA)",
+        "Butterworth LP",
+        "Butterworth HP",
+        "Butterworth BP",
+    ]
+    kind_to_index = {"ma": 0, "butter_lp": 1, "butter_hp": 2, "butter_bp": 3}
+
+    manual = preset_data.get("manual_fs")
+    try:
+        st.session_state["manual_fs"] = float(manual) if manual is not None else 0.0
+    except (TypeError, ValueError):
+        st.session_state["manual_fs"] = 0.0
+
+    fspec = preset_data.get("filter_spec")
+    if isinstance(fspec, FilterSpec):
+        st.session_state["enable_filter"] = bool(fspec.enabled)
+        st.session_state["f_kind"] = filter_kind_options[kind_to_index.get(fspec.kind, 0)]
+        try:
+            st.session_state["ma_win"] = int(fspec.ma_window)
+        except (TypeError, ValueError):
+            pass
+        try:
+            st.session_state["f_order"] = int(fspec.order)
+        except (TypeError, ValueError):
+            pass
+        cutoff = fspec.cutoff or (None, None)
+        lo, hi = cutoff if isinstance(cutoff, tuple) else (None, None)
+        st.session_state["f_lo"] = "" if lo in (None, "") else str(lo)
+        st.session_state["f_hi"] = "" if hi in (None, "") else str(hi)
+        st.session_state["overlay_orig"] = True
+
+    fft = preset_data.get("fft_spec")
+    if isinstance(fft, FFTSpec):
+        st.session_state["sidebar_enable_fft"] = bool(fft.enabled)
+        st.session_state["sidebar_detrend"] = bool(fft.detrend)
+
+
+_SETTINGS_SLIDER_RANGES = {
+    "set_max_file_mb": (50, 20000),
+    "set_max_rows_milioni": (1, 200),
+    "set_timeout_s": (30, 3600),
+    "set_chunk_size": (50000, 2000000),
+    "set_chunked_threshold_mb": (10, 1000),
+    "set_max_cols": (10, 50000),
+}
+
+_SETTINGS_KEYS = (
+    "set_max_file_mb", "set_max_rows_milioni", "set_max_cols", "set_timeout_s",
+    "set_optimize_dtypes", "set_use_optimized_loader", "set_chunked_threshold_mb",
+    "set_chunk_size", "set_use_pyarrow", "set_parallel_cleaning", "set_max_workers",
+)
+
+
+def _settings_defaults_from_config(cfg: Dict[str, Any], cores: int) -> Dict[str, Any]:
+    """Valori iniziali dei widget Impostazioni dalla config effettiva."""
+    lim = cfg.get("limits", {})
+    perf = cfg.get("performance", {})
+    adv = perf.get("advanced", {})
+    return {
+        "set_max_file_mb": int(lim.get("max_file_mb", 2500)),
+        "set_max_rows_milioni": max(1, int(round(lim.get("max_rows", 20000000) / 1_000_000))),
+        "set_max_cols": int(lim.get("max_cols", 5000)),
+        "set_timeout_s": int(lim.get("parse_timeout_s", 1200)),
+        "set_optimize_dtypes": bool(perf.get("optimize_dtypes", True)),
+        "set_use_optimized_loader": bool(perf.get("use_optimized_loader", True)),
+        "set_chunked_threshold_mb": int(perf.get("chunked_loading_threshold_mb", 300)),
+        "set_chunk_size": int(perf.get("chunk_size", 600000)),
+        "set_use_pyarrow": bool(adv.get("use_pyarrow", True)),
+        "set_parallel_cleaning": bool(adv.get("parallel_cleaning", True)),
+        "set_max_workers": int(adv.get("max_workers") or cores),
+    }
+
+
+def _clamp_settings_state(cores: int, defaults: Dict[str, Any]) -> None:
+    """Riporta i valori numerici dentro il range dei widget (evita errori slider)."""
+    ranges = dict(_SETTINGS_SLIDER_RANGES)
+    ranges["set_max_workers"] = (1, max(1, cores))
+    for key, (lo, hi) in ranges.items():
+        try:
+            st.session_state[key] = min(hi, max(lo, int(st.session_state[key])))
+        except (KeyError, TypeError, ValueError):
+            st.session_state[key] = defaults[key]
+
+
+def _apply_profile_to_settings_widgets(profile: str, cores: int) -> None:
+    """Scrive i valori di un profilo nelle chiavi dei widget Impostazioni."""
+    vals = app_settings.profile_settings(profile, cores)
+    lim = vals["limits"]
+    perf = vals["performance"]
+    adv = perf.get("advanced", {})
+    st.session_state["set_max_file_mb"] = int(lim["max_file_mb"])
+    st.session_state["set_max_rows_milioni"] = max(1, int(round(lim["max_rows"] / 1_000_000)))
+    st.session_state["set_max_cols"] = int(lim["max_cols"])
+    st.session_state["set_timeout_s"] = int(lim["parse_timeout_s"])
+    st.session_state["set_optimize_dtypes"] = bool(perf["optimize_dtypes"])
+    st.session_state["set_use_optimized_loader"] = bool(perf["use_optimized_loader"])
+    st.session_state["set_chunked_threshold_mb"] = int(perf["chunked_loading_threshold_mb"])
+    st.session_state["set_chunk_size"] = int(perf["chunk_size"])
+    st.session_state["set_use_pyarrow"] = bool(adv.get("use_pyarrow", True))
+    st.session_state["set_parallel_cleaning"] = bool(adv.get("parallel_cleaning", True))
+    st.session_state["set_max_workers"] = int(adv.get("max_workers") or cores)
+
+
+def _render_settings_panel() -> None:
+    """Pannello Impostazioni: profili prestazioni + tuning di limiti/RAM."""
+    st.markdown("### Impostazioni prestazioni")
+    st.caption(
+        "Regola la capacità di caricamento e l'uso di RAM/CPU. "
+        "Le impostazioni vengono salvate sul tuo PC e mantenute al riavvio."
+    )
+
+    hw = app_settings.detect_hardware()
+    cores = int(hw["cores"])
+    ram_gb = hw["ram_gb"]
+    recommended = app_settings.recommend_profile(ram_gb, cores)
+
+    ram_txt = f"{ram_gb:.1f} GB" if ram_gb else "non rilevata"
+    c1, c2, c3 = st.columns(3)
+    c1.metric("RAM rilevata", ram_txt)
+    c2.metric("Core CPU", str(cores))
+    c3.metric("Profilo consigliato", app_settings.PROFILE_LABELS.get(recommended, recommended))
+
+    # Inizializza le chiavi dei widget UNA volta dalla config effettiva, poi usa
+    # solo key= (niente value=) per non innescare il warning di Streamlit quando
+    # i valori vengono impostati via Session State (es. "Applica profilo").
+    cfg = app_settings.effective_config()
+    defaults = _settings_defaults_from_config(cfg, cores)
+    for _k, _v in defaults.items():
+        st.session_state.setdefault(_k, _v)
+    _clamp_settings_state(cores, defaults)
+
+    # --- Profili rapidi ---
+    profile_keys = ["leggero", "bilanciato", "qualita"]
+    profile_labels = [app_settings.PROFILE_LABELS[k] for k in profile_keys]
+
+    st.markdown("#### Profilo rapido")
+    pcol1, pcol2 = st.columns([3, 1])
+    with pcol1:
+        chosen_label = st.radio(
+            "Profilo",
+            profile_labels,
+            index=profile_keys.index(recommended),
+            horizontal=True,
+            label_visibility="collapsed",
+            key="set_profile_choice",
+        )
+    chosen_profile = profile_keys[profile_labels.index(chosen_label)]
+    with pcol2:
+        if st.button("Applica profilo", key="apply_profile_btn", use_container_width=True):
+            _apply_profile_to_settings_widgets(chosen_profile, cores)
+            st.session_state["_settings_applied_profile"] = chosen_profile
+            st.rerun()
+
+    if st.session_state.get("_settings_applied_profile"):
+        st.info(
+            f"Profilo '{app_settings.PROFILE_LABELS[st.session_state['_settings_applied_profile']]}' "
+            "applicato ai valori sotto. Premi Salva per renderlo permanente."
+        )
+
+    st.markdown("#### Capacità di caricamento file")
+    st.slider(
+        "Dimensione massima file (MB)", min_value=50, max_value=20000, step=50,
+        key="set_max_file_mb",
+        help="File più grandi di questo verranno rifiutati. Si applica al riavvio.",
+    )
+    st.slider(
+        "Righe massime (milioni)", min_value=1, max_value=200, step=1,
+        key="set_max_rows_milioni",
+    )
+    cc1, cc2 = st.columns(2)
+    with cc1:
+        st.number_input(
+            "Colonne massime", min_value=10, max_value=50000, step=10,
+            key="set_max_cols",
+        )
+    with cc2:
+        st.slider(
+            "Timeout caricamento (s)", min_value=30, max_value=3600, step=30,
+            key="set_timeout_s",
+        )
+
+    st.markdown("#### RAM e velocità")
+    rc1, rc2 = st.columns(2)
+    with rc1:
+        st.toggle(
+            "Ottimizza RAM (dtype)", key="set_optimize_dtypes",
+            help="Riduce la memoria usata convertendo le colonne numeriche a tipi più leggeri.",
+        )
+        st.toggle(
+            "Loader ottimizzato (chunked)", key="set_use_optimized_loader",
+            help="Carica i file grandi a blocchi per ridurre il picco di RAM.",
+        )
+    with rc2:
+        st.toggle("Lettura veloce (pyarrow)", key="set_use_pyarrow")
+        st.toggle("Pulizia in parallelo", key="set_parallel_cleaning")
+    st.slider(
+        "Core CPU da usare (worker)", min_value=1, max_value=max(1, cores), step=1,
+        key="set_max_workers",
+    )
+    st.slider(
+        "Dimensione blocco (righe per chunk)", min_value=50000, max_value=2000000, step=50000,
+        key="set_chunk_size",
+        help="Blocchi più grandi = più veloce ma più RAM.",
+    )
+    st.slider(
+        "Soglia caricamento a blocchi (MB)", min_value=10, max_value=1000, step=10,
+        key="set_chunked_threshold_mb",
+    )
+
+    st.caption(
+        "Alcune impostazioni (dimensione massima file, blocco, soglia, worker) "
+        "hanno pieno effetto al riavvio dell'app."
+    )
+
+    # --- Salva / Ripristina ---
+    st.markdown("---")
+    scol1, scol2 = st.columns(2)
+    with scol1:
+        if st.button("Salva impostazioni", type="primary", key="save_settings_btn", use_container_width=True):
+            new_settings = {
+                "limits": {
+                    "max_file_mb": int(st.session_state["set_max_file_mb"]),
+                    "max_rows": int(st.session_state["set_max_rows_milioni"]) * 1_000_000,
+                    "max_cols": int(st.session_state["set_max_cols"]),
+                    "parse_timeout_s": int(st.session_state["set_timeout_s"]),
+                },
+                "performance": {
+                    "optimize_dtypes": bool(st.session_state["set_optimize_dtypes"]),
+                    "use_optimized_loader": bool(st.session_state["set_use_optimized_loader"]),
+                    "chunked_loading_threshold_mb": int(st.session_state["set_chunked_threshold_mb"]),
+                    "chunk_size": int(st.session_state["set_chunk_size"]),
+                    "advanced": {
+                        "use_pyarrow": bool(st.session_state["set_use_pyarrow"]),
+                        "parallel_cleaning": bool(st.session_state["set_parallel_cleaning"]),
+                        "max_workers": int(st.session_state["set_max_workers"]),
+                    },
+                },
+            }
+            try:
+                app_settings.save_user_settings(new_settings)
+                st.session_state.pop("_settings_applied_profile", None)
+                st.success("Impostazioni salvate. Riavvia l'app per applicare la dimensione massima file.")
+            except Exception as e:
+                st.error(f"Errore nel salvataggio: {e}")
+    with scol2:
+        if st.button("Ripristina default", key="reset_settings_btn", use_container_width=True):
+            app_settings.reset_user_settings()
+            for _k in _SETTINGS_KEYS + ("_settings_applied_profile",):
+                st.session_state.pop(_k, None)
+            st.success("Impostazioni ripristinate ai valori predefiniti.")
+            st.rerun()
+
+    st.caption(f"File impostazioni: {app_settings.user_settings_path()}")
+
+
+def _render_main_app():
     # FIX ISSUE #54: Inizializza logger per web_app
     logger = LogManager(component="web_app").get_logger()
 
@@ -1334,8 +1579,6 @@ def main():
     except Exception as e:
         # Usa logger diretto senza variabile per evitare UnboundLocalError
         LogManager(component="preset").get_logger().warning(f"Impossibile creare preset default: {e}")
-
-    render_header()
 
     st.caption("Upload CSV → seleziona X/Y → limiti assi → Sidebar (fs/filtri/FFT) → report")
 
@@ -1713,75 +1956,43 @@ def main():
     preset_enable_fft = False
     preset_detrend = True
     preset_save_message: Optional[str] = st.session_state.pop("_preset_save_message", None)
-    preset_notice: Optional[str] = None
 
-    # Carica preset se presente (NON fare pop - mantieni finché non viene fatto submit)
+    # Applica un preset appena caricato UNA SOLA volta, PRIMA di creare i widget
+    # della sidebar (Streamlit vieta di modificarne la session_state dopo). Poi
+    # NON lo ri-applichiamo, così le modifiche manuali successive vengono mantenute.
+    # L'indicatore "Preset attivo" resta finché l'utente non resetta o ne carica un altro.
     if "_loaded_preset" in st.session_state:
-        preset_data = st.session_state["_loaded_preset"]
-        preset_name = st.session_state.get("_loaded_preset_name", "")
-        preset_notice = f"📂 Preset '{preset_name}' caricato. Compila il form e premi 'Applica / Plot'."
-
-        manual_from_preset = preset_data.get("manual_fs")
-        if manual_from_preset is not None:
-            try:
-                preset_manual_fs = float(manual_from_preset)
-            except (TypeError, ValueError):
-                preset_manual_fs = 0.0
-
-        fspec_loaded = preset_data.get("filter_spec")
-        if isinstance(fspec_loaded, FilterSpec):
-            preset_enable_filter = bool(fspec_loaded.enabled)
-            kind_to_index = {"ma": 0, "butter_lp": 1, "butter_hp": 2, "butter_bp": 3}
-            preset_filter_kind_idx = kind_to_index.get(fspec_loaded.kind, 0)
-            try:
-                preset_ma_win = int(fspec_loaded.ma_window)
-            except (TypeError, ValueError):
-                pass
-            try:
-                preset_filter_order = int(fspec_loaded.order)
-            except (TypeError, ValueError):
-                pass
-            cutoff_loaded = fspec_loaded.cutoff or (None, None)
-            if isinstance(cutoff_loaded, tuple):
-                lo_val, hi_val = cutoff_loaded
-            else:
-                lo_val, hi_val = (None, None)
-            preset_f_lo = "" if lo_val in (None, "") else str(lo_val)
-            preset_f_hi = "" if hi_val in (None, "") else str(hi_val)
-
-        fftspec_loaded = preset_data.get("fft_spec")
-        if isinstance(fftspec_loaded, FFTSpec):
-            preset_enable_fft = bool(fftspec_loaded.enabled)
-            preset_detrend = bool(fftspec_loaded.detrend)
+        _apply_preset_to_widgets(st.session_state.pop("_loaded_preset"))
+        st.session_state.pop("_loaded_preset_name", None)
 
     if preset_save_message:
         st.success(preset_save_message)
 
-    if preset_notice:
-        st.info(preset_notice)
+    # Inizializza UNA volta le chiavi dei widget avanzati. Poi i widget usano solo
+    # key= (niente value=/index=): così l'applicazione di un preset via Session
+    # State non innesca il warning "created with a default value but also had its
+    # value set via the Session State API".
+    _advanced_defaults = {
+        "manual_fs": float(preset_manual_fs),
+        "enable_filter": preset_enable_filter,
+        "f_kind": filter_kind_options[preset_filter_kind_idx],
+        "ma_win": int(preset_ma_win),
+        "f_order": int(preset_filter_order),
+        "f_lo": preset_f_lo,
+        "f_hi": preset_f_hi,
+        "overlay_orig": True,
+        "sidebar_enable_fft": preset_enable_fft,
+        "sidebar_detrend": preset_detrend,
+    }
+    for _k, _v in _advanced_defaults.items():
+        st.session_state.setdefault(_k, _v)
 
     # ---- SIDEBAR: ADVANCED CONTROLS ----
-    # When a preset is loaded, push its values into session_state so keyed sidebar
-    # widgets pick them up on the next render (keyed widgets ignore value= if the
-    # key already exists in session_state).
-    if "_loaded_preset" in st.session_state:
-        st.session_state["manual_fs"] = float(preset_manual_fs)
-        st.session_state["enable_filter"] = preset_enable_filter
-        st.session_state["f_kind"] = filter_kind_options[preset_filter_kind_idx]
-        st.session_state["ma_win"] = int(preset_ma_win)
-        st.session_state["f_order"] = int(preset_filter_order)
-        st.session_state["f_lo"] = preset_f_lo
-        st.session_state["f_hi"] = preset_f_hi
-        st.session_state["overlay_orig"] = True
-        st.session_state["sidebar_enable_fft"] = preset_enable_fft
-        st.session_state["sidebar_detrend"] = preset_detrend
-
     with st.sidebar:
-        st.markdown("### ⚙️ Campionamento")
+        st.markdown("### Campionamento")
         manual_fs = st.number_input(
             "Frequenza di campionamento (Hz)",
             min_value=0.0,
-            value=float(preset_manual_fs),
             step=0.1,
             key="manual_fs",
             help=">0 forza la fs; 0 = stima automatica dalla X",
@@ -1800,35 +2011,34 @@ def main():
                 st.caption("fs: sarà stimata dalla colonna X al primo plot.")
 
         st.markdown("---")
-        with st.expander("🔧 Filtro", expanded=False):
-            enable_filter = st.checkbox("Abilita filtro", value=preset_enable_filter, key="enable_filter")
+        with st.expander("Filtro", expanded=False):
+            enable_filter = st.checkbox("Abilita filtro", key="enable_filter")
             f_kind = st.selectbox(
                 "Tipo filtro",
                 filter_kind_options,
-                index=preset_filter_kind_idx,
                 key="f_kind",
             )
             ma_win = st.number_input(
-                "MA - finestra (campioni)", min_value=1, value=int(preset_ma_win), step=1, key="ma_win"
+                "MA - finestra (campioni)", min_value=1, step=1, key="ma_win"
             )
             f_order = st.number_input(
-                "Butterworth - ordine", min_value=1, value=int(preset_filter_order), step=1, key="f_order"
+                "Butterworth - ordine", min_value=1, step=1, key="f_order"
             )
             cc1, cc2 = st.columns(2)
             with cc1:
                 f_lo = st.text_input(
-                    "Cutoff low (Hz)", value=preset_f_lo, placeholder="es. 5", key="f_lo"
+                    "Cutoff low (Hz)", placeholder="es. 5", key="f_lo"
                 )
             with cc2:
                 f_hi = st.text_input(
-                    "Cutoff high (Hz) - solo BP", value=preset_f_hi, placeholder="es. 20", key="f_hi"
+                    "Cutoff high (Hz) - solo BP", placeholder="es. 20", key="f_hi"
                 )
             overlay_orig = st.checkbox(
-                "Sovrapponi originale e filtrato", value=True, key="overlay_orig"
+                "Sovrapponi originale e filtrato", key="overlay_orig"
             )
 
         st.markdown("---")
-        with st.expander("📊 FFT", expanded=False):
+        with st.expander("FFT", expanded=False):
             fft_help = (
                 "Calcola lo spettro FFT per ogni serie selezionata."
                 if fft_available
@@ -1836,7 +2046,6 @@ def main():
             )
             enable_fft = st.checkbox(
                 "Calcola FFT",
-                value=preset_enable_fft,
                 disabled=not fft_available,
                 help=fft_help,
                 key="sidebar_enable_fft",
@@ -1854,13 +2063,12 @@ def main():
             )
             detrend = st.checkbox(
                 "Detrend (togli media)",
-                value=preset_detrend,
                 disabled=not fft_available,
                 key="sidebar_detrend",
             )
 
         st.markdown("---")
-        with st.expander("📐 Limiti assi", expanded=False):
+        with st.expander("Limiti assi", expanded=False):
             _ax_last_y = [c for c in st.session_state.get("_last_y_cols", []) if c]
 
             st.caption("Asse X (globale)")
@@ -1957,7 +2165,7 @@ def main():
     ):
         st.caption("Trasformazioni applicate al segnale prima del filtro, in sequenza.")
 
-        with st.expander("ℹ️ Guida trasformazioni", expanded=False):
+        with st.expander("Guida trasformazioni", expanded=False):
             _guide_rows = []
             for _gk, _glabel in TRANSFORM_LABELS.items():
                 _g = TRANSFORM_GUIDE[_gk]
@@ -1974,7 +2182,7 @@ def main():
                 hide_index=False,
             )
             st.caption(
-                "⚠️ Le trasformazioni con 'Cambia lunghezza = Sì' (Derivata, Ricampionamento) "
+                "Le trasformazioni con 'Cambia lunghezza = Sì' (Derivata, Ricampionamento) "
                 "non possono essere incluse nel report statistico insieme alle altre colonne."
             )
 
@@ -2084,7 +2292,7 @@ def main():
                 else:
                     st.empty()
             with _tc4:
-                if st.button("🗑️", key=f"tr_{_i}_del", help=f"Elimina passo {_i + 1}"):
+                if st.button("Elimina", key=f"tr_{_i}_del", help=f"Elimina passo {_i + 1}"):
                     st.session_state["_pending_delete_step"] = _i
                     _needs_rerun = True
 
@@ -2153,6 +2361,9 @@ def main():
     # ---- PRESET CONFIGURAZIONI (FUORI DAL FORM) ----
     with st.expander("Preset Configurazioni", expanded=False):
         st.markdown("Salva e riutilizza configurazioni filtri/FFT frequenti.")
+        _active_preset = st.session_state.get("_active_preset_name")
+        if _active_preset:
+            st.success(f"Preset attivo: **{_active_preset}**")
         if _IS_STREAMLIT_CLOUD:
             st.info(
                 "Su Streamlit Cloud i preset personalizzati vengono persi al riavvio dell'app. "
@@ -2182,25 +2393,25 @@ def main():
             st.write("")  # spacer per allineare il pulsante
             delete_clicked = st.button("Elimina", disabled=selected_preset == "---", key="delete_preset_btn")
 
-        # Logica Load Preset
+        # Logica Load Preset: applica SUBITO i parametri (rerun) e segna il preset attivo.
         if load_clicked and selected_preset != "---":
             try:
                 preset_data = load_preset(selected_preset)
-                st.session_state["_loaded_preset"] = preset_data
-                st.session_state["_loaded_preset_name"] = selected_preset
-                # Non fare st.rerun() - lascia che i valori vengano applicati al rendering successivo
-                st.success(f"✅ Preset '{selected_preset}' caricato! I parametri sono ora attivi nel form sottostante.")
+                st.session_state["_loaded_preset"] = preset_data  # consumato a inizio prossimo run
+                st.session_state["_active_preset_name"] = selected_preset
+                st.session_state["_preset_save_message"] = f"Preset '{selected_preset}' caricato e applicato."
+                st.rerun()
             except PresetError as e:
-                st.error(f"❌ Errore caricamento: {e}")
+                st.error(f"Errore caricamento: {e}")
 
         # Logica Delete Preset
         if delete_clicked and selected_preset != "---":
             try:
                 delete_preset(selected_preset)
-                st.success(f"🗑️ Preset '{selected_preset}' eliminato.")
+                st.success(f"Preset '{selected_preset}' eliminato.")
                 st.rerun()
             except PresetError as e:
-                st.error(f"❌ Errore eliminazione: {e}")
+                st.error(f"Errore eliminazione: {e}")
 
         st.markdown("---")
         st.markdown("**Salva configurazione corrente come preset**")
@@ -2222,14 +2433,13 @@ def main():
                     "name": new_preset_name.strip(),
                     "description": new_preset_desc.strip()
                 }
-                st.info("ℹ️ Compila il form sottostante e premi 'Applica / Plot' per completare il salvataggio.")
+                st.info("Compila il form sottostante e premi 'Applica / Plot' per completare il salvataggio.")
 
     if submitted:
         st.session_state["_plots_ready"] = True
         st.session_state["_last_y_cols"] = y_cols  # usato dal pannello Trasformazioni
-        # Pulisci il preset caricato dopo il submit per evitare che rimanga attivo
-        st.session_state.pop("_loaded_preset", None)
-        st.session_state.pop("_loaded_preset_name", None)
+        # NB: NON azzeriamo il preset attivo dopo il submit: i suoi valori restano
+        # applicati e l'indicatore "Preset attivo" continua a mostrarlo.
 
     if not st.session_state.get("_plots_ready"):
         st.info("Compila il form e premi 'Applica / Plot' per visualizzare grafici e report.")
@@ -2240,7 +2450,7 @@ def main():
         return
 
 
-    tab_analisi, tab_report = st.tabs(["📊  Analisi", "📋  Report"])
+    tab_analisi, tab_report = st.tabs(["Analisi", "Report"])
 
     with tab_analisi:
         x_name = x_col if (x_col and x_col != "—") else None
@@ -2379,13 +2589,13 @@ def main():
                     manual_fs=manual_fs if manual_fs > 0 else None
                 )
                 st.session_state.pop("_pending_preset_save", None)
-                st.session_state["_preset_save_message"] = f"💾 Preset '{pending_save['name']}' salvato con successo!"
+                st.session_state["_preset_save_message"] = f"Preset '{pending_save['name']}' salvato con successo!"
                 st.rerun()
             except PresetError as e:
-                st.error(f"❌ Impossibile salvare preset: {e}")
+                st.error(f"Impossibile salvare preset: {e}")
                 st.session_state.pop("_pending_preset_save", None)
             except Exception as exc:
-                st.error(f"❌ Errore inatteso salvataggio preset: {exc}")
+                st.error(f"Errore inatteso salvataggio preset: {exc}")
                 st.session_state.pop("_pending_preset_save", None)
 
         if fftspec.enabled:
@@ -2469,7 +2679,7 @@ def main():
                 df_downsampled = True
                 downsampled_metadata = ds_result
                 st.caption(
-                    f"⚡ Pre-decimazione: {total_rows:,} → {len(df_plot):,} righe "
+                    f"Pre-decimazione: {total_rows:,} → {len(df_plot):,} righe "
                     f"({ds_result.reduction_ratio:.1f}×, {ds_result.method.upper()})"
                 )
 
@@ -3268,13 +3478,26 @@ def main():
                 _plotly_chart(st, visual_result["figure"], key="visual_report_preview")
 
         st.divider()
-        with st.expander("ℹ️ Info rilevate (clicca per espandere)", expanded=False):
+        with st.expander("Info rilevate (clicca per espandere)", expanded=False):
             st.json(meta)
 
         # Footer: mostra loader type
-        loader_emoji = "🚀" if LOADER_TYPE == "optimized" else "📦"
         loader_desc = "Ottimizzato (chunked)" if LOADER_TYPE == "optimized" else "Standard"
-        st.caption(f"{loader_emoji} Loader: {loader_desc}")
+        st.caption(f"Loader: {loader_desc}")
+
+
+def main():
+    """Entry point: header sempre visibile + due schede (Analisi / Impostazioni)."""
+    _ensure_session_id()
+    st.set_page_config(page_title="Analizzatore CSV - Web", layout="wide")
+
+    render_header()
+
+    tab_app, tab_settings = st.tabs(["Analisi", "Impostazioni"])
+    with tab_settings:
+        _render_settings_panel()
+    with tab_app:
+        _render_main_app()
 
 
 if __name__ == "__main__":

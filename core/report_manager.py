@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 
 from .logger import LogManager
+from .paths import resource_path, outputs_dir
 
 
 log = LogManager("report").get_logger()
@@ -47,16 +48,14 @@ class ReportManager:
     """
 
     def __init__(self) -> None:
-        self.project_root = Path(__file__).resolve().parents[1]
-        self.outputs_dir = self.project_root / "outputs"
-        self.outputs_dir.mkdir(parents=True, exist_ok=True)
+        self.outputs_dir = outputs_dir()
         self.cfg = self._load_config()
 
     def _load_config(self) -> dict:
         defaults = {
             "nan_strategy": "drop",  # drop | fill_zero | ffill (usato solo se in futuro servisse su DF in ingresso)
         }
-        cfg_path = self.project_root / "config.json"
+        cfg_path = resource_path("config.json")
         if cfg_path.exists():
             try:
                 data = json.loads(cfg_path.read_text(encoding="utf-8"))

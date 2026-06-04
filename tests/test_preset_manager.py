@@ -22,17 +22,16 @@ from core.signal_tools import FilterSpec, FFTSpec
 
 
 @pytest.fixture
-def clean_presets_dir():
-    """Fixture per pulire la directory presets prima e dopo ogni test."""
-    # Setup: pulisci prima del test
-    if PRESETS_DIR.exists():
-        shutil.rmtree(PRESETS_DIR)
+def clean_presets_dir(tmp_path, monkeypatch):
+    """Reindirizza i preset in una cartella temporanea isolata.
 
-    yield
-
-    # Teardown: pulisci dopo il test
-    if PRESETS_DIR.exists():
-        shutil.rmtree(PRESETS_DIR)
+    Importante: NON tocca la cartella 'presets/' del repository (i preset di
+    default tracciati in git). Restituisce il percorso temporaneo usato.
+    """
+    presets_dir = tmp_path / "presets"
+    presets_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("core.preset_manager.PRESETS_DIR", presets_dir)
+    yield presets_dir
 
 
 def test_sanitize_name():
@@ -195,11 +194,10 @@ def test_load_nonexistent_preset(clean_presets_dir):
         load_preset("Nonexistent")
 
 
-def test_load_corrupted_preset(clean_presets_dir, tmp_path):
+def test_load_corrupted_preset(clean_presets_dir):
     """Test caricamento file JSON corrotto."""
-    # Crea file corrotto manualmente
-    PRESETS_DIR.mkdir(parents=True, exist_ok=True)
-    corrupted_file = PRESETS_DIR / "Corrupted.json"
+    # Crea file corrotto manualmente nella cartella temporanea isolata
+    corrupted_file = clean_presets_dir / "Corrupted.json"
     corrupted_file.write_text("{ invalid json", encoding='utf-8')
 
     with pytest.raises(PresetError, match="corrotto"):

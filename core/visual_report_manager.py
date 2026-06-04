@@ -10,6 +10,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 from .logger import LogManager
+from .paths import outputs_dir
 
 __all__ = ["VisualPlotSpec", "VisualReportManager"]
 
@@ -30,8 +31,7 @@ class VisualReportManager:
     """Crea report visivi composti da massimo 4 grafici impilati."""
 
     def __init__(self, output_dir: Optional[Path] = None) -> None:
-        project_root = Path(__file__).resolve().parents[1]
-        base_dir = output_dir or (project_root / "outputs" / "visual_reports")
+        base_dir = output_dir or (outputs_dir() / "visual_reports")
         base_dir.mkdir(parents=True, exist_ok=True)
         self.output_dir = base_dir
 

@@ -12,6 +12,7 @@ import pandas as pd
 import plotly.graph_objects as go
 
 from .logger import LogManager
+from .paths import resource_path, outputs_dir
 
 __all__ = ["PlotManager"]
 
@@ -22,9 +23,7 @@ class PlotManager:
     """Generatore di line-plot Plotly con pulizia dati, slicing, downsampling e salvataggio HTML."""
 
     def __init__(self) -> None:
-        self.project_root = Path(__file__).resolve().parents[1]
-        self.outputs_dir = self.project_root / "outputs"
-        self.outputs_dir.mkdir(parents=True, exist_ok=True)
+        self.outputs_dir = outputs_dir()
         self.cfg = self._load_config()
         log.info("PlotManager pronto. Output dir: %s", self.outputs_dir)
 
@@ -36,7 +35,7 @@ class PlotManager:
             "nan_strategy": "drop",
             "open_mode": "html",  # html | show | both
         }
-        cfg_path = self.project_root / "config.json"
+        cfg_path = resource_path("config.json")
         if cfg_path.exists():
             try:
                 data = json.loads(cfg_path.read_text(encoding="utf-8"))

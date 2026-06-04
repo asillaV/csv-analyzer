@@ -18,6 +18,7 @@ from tkinter.scrolledtext import ScrolledText
 # Core del progetto
 from core.analyzer import analyze_csv
 from core.csv_cleaner import CleaningReport
+from core.paths import outputs_dir
 from core.loader import load_csv
 from core.report_manager import ReportManager
 from core.downsampling import downsample_series, DownsampleResult
@@ -39,8 +40,7 @@ def _safe_base(name: str) -> str:
     return base if base else "plot"
 
 def save_plot_html(fig: go.Figure, base: str) -> Path:
-    out_dir = Path("outputs")
-    out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir = outputs_dir()
     base = _safe_base(base)
     p = (out_dir / f"{base}.html").resolve()
     fig.write_html(str(p), include_plotlyjs="cdn", full_html=True)

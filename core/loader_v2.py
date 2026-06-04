@@ -48,8 +48,7 @@ except ImportError:
 
 # Configurazione avanzata
 def _load_advanced_config() -> Dict:
-    """Carica configurazione avanzata per v2"""
-    import json
+    """Carica configurazione avanzata dalla config effettiva (default + override)."""
     defaults = {
         "use_pyarrow": True,  # Engine Pyarrow (richiede pyarrow installato)
         "parallel_cleaning": True,  # Parallelizza pulizia colonne
@@ -58,16 +57,16 @@ def _load_advanced_config() -> Dict:
         "max_workers": None,  # None = auto (num CPU cores)
     }
     try:
-        with open("config.json", "r") as f:
-            config = json.load(f)
-            advanced = config.get("performance", {}).get("advanced", {})
-            return {
-                "use_pyarrow": advanced.get("use_pyarrow", defaults["use_pyarrow"]),
-                "parallel_cleaning": advanced.get("parallel_cleaning", defaults["parallel_cleaning"]),
-                "early_stop_format_detection": advanced.get("early_stop_format_detection", defaults["early_stop_format_detection"]),
-                "skip_nonnumeric_cleaning": advanced.get("skip_nonnumeric_cleaning", defaults["skip_nonnumeric_cleaning"]),
-                "max_workers": advanced.get("max_workers", defaults["max_workers"]),
-            }
+        from core.settings import effective_config
+
+        advanced = effective_config().get("performance", {}).get("advanced", {})
+        return {
+            "use_pyarrow": advanced.get("use_pyarrow", defaults["use_pyarrow"]),
+            "parallel_cleaning": advanced.get("parallel_cleaning", defaults["parallel_cleaning"]),
+            "early_stop_format_detection": advanced.get("early_stop_format_detection", defaults["early_stop_format_detection"]),
+            "skip_nonnumeric_cleaning": advanced.get("skip_nonnumeric_cleaning", defaults["skip_nonnumeric_cleaning"]),
+            "max_workers": advanced.get("max_workers", defaults["max_workers"]),
+        }
     except Exception:
         return defaults
 

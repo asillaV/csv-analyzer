@@ -26,6 +26,7 @@ from textual.widgets import (
 
 from core.analyzer import analyze_csv
 from core.csv_cleaner import CleaningReport
+from core.paths import outputs_dir
 from core.loader import load_csv
 from core.report_manager import ReportManager
 from core.downsampling import downsample_series, DownsampleResult
@@ -75,8 +76,7 @@ def _safe_base(name: str) -> str:
 
 
 def _save_open_html(fig: go.Figure, base: str) -> Path:
-    out_dir = Path("outputs")
-    out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir = outputs_dir()
     base = _safe_base(base)
     path = (out_dir / f"{base}.html").resolve()   # <--- assoluto
     fig.write_html(str(path), include_plotlyjs="cdn", full_html=True)

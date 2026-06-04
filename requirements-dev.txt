@@ -2,3 +2,6 @@
 -r requirements.txt
 textual>=0.89,<0.91
 rich>=13.9
+
+# Packaging eseguibile portabile Windows
+pyinstaller>=6.6
