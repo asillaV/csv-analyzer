@@ -24,6 +24,7 @@ import streamlit as st
 
 from core.analyzer import analyze_csv
 from core.csv_cleaner import CleaningReport
+from core.csv_parser_worker import _parsing_worker
 from core.paths import resource_path
 from core import settings as app_settings
 
@@ -182,23 +183,6 @@ def _clear_cached_dataset() -> None:
     st.session_state.pop("_cached_meta", None)
     st.session_state.pop("_cached_file_sig", None)
     st.session_state.pop("_cached_apply_cleaning", None)
-
-
-def _parsing_worker(result_queue: "mp.Queue", file_path: str, apply_cleaning: bool) -> None:
-    """Worker che analizza e carica il CSV, inviando il risultato tramite coda."""
-    try:
-        meta = analyze_csv(file_path)
-        df, cleaning_report = load_csv(
-            file_path,
-            encoding=meta.get("encoding"),
-            delimiter=meta.get("delimiter"),
-            header=meta.get("header"),
-            apply_cleaning=apply_cleaning,
-            return_details=True,
-        )
-        result_queue.put(("ok", meta, df, cleaning_report))
-    except Exception as exc:  # pragma: no cover - il messaggio viene gestito dal caller
-        result_queue.put(("error", exc))
 
 
 def _parse_csv_in_thread(file_bytes: bytes, apply_cleaning: bool) -> Tuple[pd.DataFrame, CleaningReport, Dict[str, Any]]:

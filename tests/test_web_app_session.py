@@ -302,6 +302,21 @@ def test_reject_large_file():
     assert _check_size_limit(small_file_size, limits) is None
 
 
+def test_parsing_worker_not_in_main_module():
+    """
+    Regressione: il worker dello slow path subprocess deve risiedere in un modulo
+    importabile (core.csv_parser_worker), NON in web_app.py.
+
+    Streamlit esegue web_app.py come __main__: se _parsing_worker fosse definito
+    li', verrebbe pickled come __main__._parsing_worker e il processo figlio
+    (spawn, obbligatorio su Windows/PyInstaller) lo cercherebbe nel proprio
+    __main__ (run_app.py nel bundle), fallendo con:
+        AttributeError: Can't get attribute '_parsing_worker' on <module '__main__'>
+    """
+    assert web_app._parsing_worker.__module__ == "core.csv_parser_worker"
+    assert web_app._parsing_worker.__module__ != "__main__"
+
+
 def test_parse_cleanup_on_exception(monkeypatch):
     """
     Anche in caso di eccezione il file temporaneo deve essere rimosso.
