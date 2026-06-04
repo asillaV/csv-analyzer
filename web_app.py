@@ -4,9 +4,7 @@ import concurrent.futures
 import hashlib
 import html
 import inspect
-import multiprocessing as mp
 import os
-import queue
 import tempfile
 from functools import lru_cache
 from pathlib import Path
@@ -24,7 +22,6 @@ import streamlit as st
 
 from core.analyzer import analyze_csv
 from core.csv_cleaner import CleaningReport
-from core.csv_parser_worker import _parsing_worker
 from core.paths import resource_path
 from core import settings as app_settings
 
@@ -209,10 +206,6 @@ def _parse_csv_in_thread(file_bytes: bytes, apply_cleaning: bool) -> Tuple[pd.Da
             pass
 
 
-# File < soglia: usa threading (zero spawn overhead).
-# File >= soglia: usa subprocess per memory isolation e kill reale in caso di OOM.
-_THREADING_SIZE_THRESHOLD = 200 * 1024 * 1024  # 200 MB
-
 # Rilevamento ambiente Streamlit Cloud (impostare IS_STREAMLIT_CLOUD=true nelle env vars del deploy)
 _IS_STREAMLIT_CLOUD = bool(
     os.environ.get("STREAMLIT_SHARING_MODE") or os.environ.get("IS_STREAMLIT_CLOUD")
@@ -220,62 +213,15 @@ _IS_STREAMLIT_CLOUD = bool(
 
 
 def _parse_csv_with_timeout(file_bytes: bytes, apply_cleaning: bool, timeout_s: float) -> Tuple[pd.DataFrame, CleaningReport, Dict[str, Any]]:
-    """Esegue analyze + load con timeout.
-
-    File piccoli (<= 200 MB): thread nello stesso processo (nessun overhead spawn).
-    File grandi (> 200 MB): subprocess separato per memory isolation e kill reale se OOM.
-    Il worker e' in core.csv_parser_worker (non in __main__) per compatibilita' PyInstaller.
-    """
-    if len(file_bytes) <= _THREADING_SIZE_THRESHOLD:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(_parse_csv_in_thread, file_bytes, apply_cleaning)
-            try:
-                return future.result(timeout=timeout_s)
-            except concurrent.futures.TimeoutError:
-                raise TimeoutError(
-                    f"Parsing del CSV oltre il tempo massimo di {timeout_s:.0f}s."
-                ) from None
-
-    # Slow path: subprocess per file grandi (memory isolation + kill reale se OOM).
-    ctx = mp.get_context("spawn")
-    result_queue: mp.Queue = ctx.Queue()
-    fd, tmp_name = tempfile.mkstemp(prefix="csv_upload_", suffix=".csv")
-    tmp_path = Path(tmp_name)
-    try:
-        with os.fdopen(fd, "wb") as tmp_file:
-            tmp_file.write(file_bytes)
-
-        process = ctx.Process(
-            target=_parsing_worker,
-            args=(result_queue, str(tmp_path), apply_cleaning),
-            daemon=True,
-        )
-        process.start()
-
+    """Esegue analyze + load con timeout tramite thread (compatibile con PyInstaller)."""
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(_parse_csv_in_thread, file_bytes, apply_cleaning)
         try:
-            message = result_queue.get(timeout=timeout_s)
-        except queue.Empty:
-            process.terminate()
-            process.join()
+            return future.result(timeout=timeout_s)
+        except concurrent.futures.TimeoutError:
             raise TimeoutError(
                 f"Parsing del CSV oltre il tempo massimo di {timeout_s:.0f}s."
             ) from None
-
-        process.join()
-        status = message[0]
-        if status == "ok":
-            _, meta, df, cleaning_report = message
-            return df, cleaning_report, dict(meta)
-
-        error = message[1] if len(message) > 1 else RuntimeError("Errore sconosciuto nel parsing.")
-        if isinstance(error, Exception):
-            raise error
-        raise RuntimeError(str(error))
-    finally:
-        try:
-            tmp_path.unlink(missing_ok=True)
-        except OSError:
-            pass
 SAMPLE_CSV_PATH = resource_path("assets/sample_timeseries.csv")
 
 # Cache limits
