@@ -1,0 +1,316 @@
+{
+ "schema_version": 1,
+ "diagram_type": "architecture",
+ "meta": {
+  "title": "csv-analyzer: core and interfaces",
+  "output": "docs/architecture/architecture.html",
+  "quality_profile": "showcase",
+  "repository": {
+   "url": "https://github.com/asillaV/csv-analyzer",
+   "provider": "github",
+   "revision": "63ca265fbfc29c0b0079d6a016c0cf9b4eb2a832"
+  }
+ },
+ "components": [
+  {
+   "id": "csv",
+   "type": "external",
+   "label": "CSV file",
+   "sublabel": "upload or local path",
+   "pos": [
+    250,
+    40
+   ],
+   "size": [
+    220,
+    64
+   ],
+   "sources": [
+    {
+     "path": "core/loader.py",
+     "line": 78
+    },
+    {
+     "path": "web_app.py",
+     "line": 1391,
+     "end_line": 1396
+    }
+   ]
+  },
+  {
+   "id": "config",
+   "type": "external",
+   "label": "config.json",
+   "sublabel": "loader and report settings",
+   "pos": [
+    610,
+    40
+   ],
+   "size": [
+    220,
+    64
+   ],
+   "sources": [
+    {
+     "path": "core/loader_optimized.py",
+     "line": 51
+    },
+    {
+     "path": "core/report_manager.py",
+     "line": 55,
+     "end_line": 59
+    }
+   ]
+  },
+  {
+   "id": "core",
+   "type": "backend",
+   "label": "core/ package",
+   "sublabel": "load, signal tools, reports, presets",
+   "pos": [
+    360,
+    200
+   ],
+   "size": [
+    320,
+    64
+   ],
+   "sources": [
+    {
+     "path": "core/loader.py",
+     "line": 19
+    },
+    {
+     "path": "core/signal_tools.py",
+     "line": 323,
+     "end_line": 356
+    },
+    {
+     "path": "core/report_manager.py",
+     "line": 39
+    }
+   ]
+  },
+  {
+   "id": "disk",
+   "type": "database",
+   "label": "Local disk",
+   "sublabel": "outputs/, presets/, logs/",
+   "pos": [
+    860,
+    200
+   ],
+   "size": [
+    200,
+    64
+   ],
+   "sources": [
+    {
+     "path": "core/report_manager.py",
+     "line": 50,
+     "end_line": 52
+    },
+    {
+     "path": "core/preset_manager.py",
+     "line": 21
+    },
+    {
+     "path": "core/logger.py",
+     "line": 38,
+     "end_line": 41
+    }
+   ]
+  },
+  {
+   "id": "web",
+   "type": "frontend",
+   "label": "Streamlit web app",
+   "sublabel": "web_app.py (main interface)",
+   "pos": [
+    40,
+    400
+   ],
+   "size": [
+    230,
+    64
+   ],
+   "sources": [
+    {
+     "path": "web_app.py",
+     "line": 1324,
+     "end_line": 1326
+    },
+    {
+     "path": "web_app.py",
+     "line": 1391
+    }
+   ]
+  },
+  {
+   "id": "tui",
+   "type": "frontend",
+   "label": "Textual TUI",
+   "sublabel": "main.py + ui/main_app.py",
+   "pos": [
+    360,
+    400
+   ],
+   "size": [
+    230,
+    64
+   ],
+   "sources": [
+    {
+     "path": "main.py",
+     "line": 6,
+     "end_line": 12
+    },
+    {
+     "path": "ui/main_app.py",
+     "line": 93
+    }
+   ]
+  },
+  {
+   "id": "tk",
+   "type": "frontend",
+   "label": "Tkinter desktop",
+   "sublabel": "desktop_app_tk.py + ui/desktop_app.py",
+   "pos": [
+    680,
+    400
+   ],
+   "size": [
+    230,
+    64
+   ],
+   "sources": [
+    {
+     "path": "desktop_app_tk.py",
+     "line": 6,
+     "end_line": 13
+    },
+    {
+     "path": "ui/desktop_app.py",
+     "line": 158
+    }
+   ]
+  },
+  {
+   "id": "plotly",
+   "type": "external",
+   "label": "Plotly figures",
+   "sublabel": "browser page or st.plotly_chart",
+   "pos": [
+    360,
+    590
+   ],
+   "size": [
+    320,
+    64
+   ],
+   "sources": [
+    {
+     "path": "ui/main_app.py",
+     "line": 82,
+     "end_line": 88
+    },
+    {
+     "path": "ui/desktop_app.py",
+     "line": 46,
+     "end_line": 50
+    },
+    {
+     "path": "web_app.py",
+     "line": 592,
+     "end_line": 593
+    }
+   ]
+  }
+ ],
+ "boundaries": [
+  {
+   "kind": "security-group",
+   "label": "core/ (no UI imports)",
+   "wraps": [
+    "core"
+   ]
+  }
+ ],
+ "connections": [
+  {
+   "id": "csv-core",
+   "from": "csv",
+   "to": "core",
+   "label": "read",
+   "variant": "emphasis"
+  },
+  {
+   "id": "config-core",
+   "from": "config",
+   "to": "core",
+   "label": "read"
+  },
+  {
+   "id": "core-disk",
+   "from": "core",
+   "to": "disk",
+   "label": "write",
+   "variant": "emphasis"
+  },
+  {
+   "id": "web-core",
+   "from": "web",
+   "to": "core",
+   "label": "calls",
+   "variant": "emphasis"
+  },
+  {
+   "id": "tui-core",
+   "from": "tui",
+   "to": "core",
+   "label": "calls"
+  },
+  {
+   "id": "tk-core",
+   "from": "tk",
+   "to": "core",
+   "label": "calls"
+  },
+  {
+   "id": "web-plotly",
+   "from": "web",
+   "to": "plotly",
+   "label": "figures"
+  },
+  {
+   "id": "tui-plotly",
+   "from": "tui",
+   "to": "plotly",
+   "label": "HTML"
+  },
+  {
+   "id": "tk-plotly",
+   "from": "tk",
+   "to": "plotly",
+   "label": "HTML"
+  }
+ ],
+ "cards": [
+  {
+   "dot": "cyan",
+   "title": "Primary path",
+   "items": [
+    "A CSV is read by core/ (load and clean), processed, and the report is written to outputs/ on disk; the Streamlit app is the main interface"
+   ]
+  },
+  {
+   "dot": "amber",
+   "title": "Not drawn",
+   "items": [
+    "plot_manager.py and loader_v2.py: not imported by any app",
+    "Per-module calls: each interface calls core functions directly, no core-internal pipeline"
+   ]
+  }
+ ]
+}

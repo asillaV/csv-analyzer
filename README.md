@@ -112,6 +112,12 @@ Durante l'uso:
 ---
 
 ## Architettura del progetto
+
+![Architettura di csv-analyzer: core e interfacce](docs/architecture/architecture.png)
+
+Percorso primario (evidenziato): un CSV (caricato nell'app Streamlit o indicato da percorso) viene letto dal pacchetto `core/`, che lo carica e lo pulisce, applica le analisi sul segnale e scrive i report in `outputs/`. Le tre interfacce (Streamlit, Textual, Tkinter) chiamano le stesse funzioni di `core/`, che non importa nessuna libreria di interfaccia. Versione interattiva: [`docs/architecture/architecture.html`](docs/architecture/architecture.html), generata con [Archify](https://github.com/tt-a1i/archify) da [`architecture.spec.json`](docs/architecture/architecture.spec.json).
+
+Struttura dei moduli:
 ```text
 core/
     analyzer.py                 -> Auto-rileva metadati dei CSV

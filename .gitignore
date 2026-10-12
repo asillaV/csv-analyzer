@@ -83,3 +83,5 @@ benchmark_ultra_fast.py
 test_config_loader.py
 test_correctness.py
 test_reset_functionality.md
+# Archify: receipt locale con percorsi assoluti
+docs/architecture/*.delivery.json
