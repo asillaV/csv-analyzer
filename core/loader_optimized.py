@@ -14,7 +14,6 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Callable, Dict, Iterable, Optional, Tuple
-import os
 
 import numpy as np
 import pandas as pd
@@ -293,7 +292,6 @@ def load_csv_chunked(
             progress_callback(progress)
 
         # Pulisci chunk
-        from .csv_cleaner import clean_dataframe
         result = clean_dataframe(
             chunk,
             apply=apply_cleaning,

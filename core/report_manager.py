@@ -223,7 +223,6 @@ class ReportManager:
             med = float(np.nanpercentile(arr, 50.0))
             q75 = float(np.nanpercentile(arr, p75))
             q97_5 = float(np.nanpercentile(arr, p97))
-            iqr = q75 - q25  # (puoi esporre come 'IQR' se vuoi una colonna separata)
 
             # first/last
             try:

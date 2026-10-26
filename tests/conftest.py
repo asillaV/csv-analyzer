@@ -5,7 +5,6 @@ import tempfile
 from pathlib import Path
 from typing import Iterator
 
-import numpy as np
 import pandas as pd
 import pytest
 

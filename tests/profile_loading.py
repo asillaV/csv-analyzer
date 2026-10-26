@@ -72,14 +72,14 @@ def profile_all_test_files():
             numeric_cols = len(report.numeric_columns)
 
             print(f"Dimensioni: {file_size_kb:.1f} KB | Righe: {rows:,} | Colonne: {cols} | Numeriche: {numeric_cols}")
-            print(f"\nTempi (con cleaning):")
+            print("\nTempi (con cleaning):")
             print(f"  • Analyze:    {timings_clean['analyze']*1000:>8.2f} ms")
             print(f"  • Load+Clean: {timings_clean['load_total']*1000:>8.2f} ms")
             print(f"  • TOTALE:     {timings_clean['total']*1000:>8.2f} ms")
 
             # Profile without cleaning
             timings_no_clean, _, _ = profile_csv_loading(str(csv_file), apply_cleaning=False)
-            print(f"\nTempi (senza cleaning):")
+            print("\nTempi (senza cleaning):")
             print(f"  • Load only:  {timings_no_clean['load_total']*1000:>8.2f} ms")
 
             # Calculate cleaning overhead
@@ -90,7 +90,7 @@ def profile_all_test_files():
             analyze_pct = (timings_clean['analyze'] / timings_clean['total']) * 100
             load_pct = (timings_clean['load_total'] / timings_clean['total']) * 100
 
-            print(f"\nDistribuzione tempo:")
+            print("\nDistribuzione tempo:")
             print(f"  • Analyze:    {analyze_pct:>5.1f}%")
             print(f"  • Load+Clean: {load_pct:>5.1f}%")
 
@@ -113,7 +113,7 @@ def profile_all_test_files():
     # Summary
     if results:
         print(f"\n\n{'='*80}")
-        print(f"RIEPILOGO")
+        print("RIEPILOGO")
         print(f"{'='*80}\n")
 
         total_analyze = sum(r['analyze_ms'] for r in results)
@@ -128,7 +128,7 @@ def profile_all_test_files():
         print(f"  • Overhead cleaning: {total_cleaning:>10.2f} ms ({total_cleaning/total_time*100:.1f}%)")
 
         # Find slowest operations
-        print(f"\nFile più lenti:")
+        print("\nFile più lenti:")
         sorted_results = sorted(results, key=lambda x: x['total_ms'], reverse=True)[:3]
         for i, r in enumerate(sorted_results, 1):
             print(f"  {i}. {r['file']:30s} - {r['total_ms']:>8.2f} ms ({r['rows']:,} righe)")

@@ -7,7 +7,6 @@ import pytest
 
 from core.signal_transforms import (
     TransformSpec,
-    TransformResult,
     TRANSFORM_LABELS,
     validate_transform_spec,
     apply_transform,
@@ -20,7 +19,6 @@ from core.signal_tools import FsInfo
 from tests.fixtures.synthetic_signals import (
     generate_sine_wave,
     generate_ramp,
-    generate_white_noise,
 )
 
 

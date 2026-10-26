@@ -1,7 +1,6 @@
 """Test per core/csv_cleaner.py - pulizia e conversione dati numerici."""
 from __future__ import annotations
 
-import numpy as np
 import pandas as pd
 import pytest
 
@@ -10,8 +9,6 @@ from core.csv_cleaner import (
     suggest_number_format,
     FormatSuggestion,
     CleaningReport,
-    DECIMAL_CANDIDATES,
-    MIN_CONVERSION_RATE,
 )
 
 

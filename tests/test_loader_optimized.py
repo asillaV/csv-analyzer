@@ -11,8 +11,6 @@ Testa:
 import pytest
 import pandas as pd
 import numpy as np
-from pathlib import Path
-import tempfile
 
 from core.loader_optimized import (
     load_csv,

@@ -1,0 +1,10 @@
+# Lint configuration for CI: pyflakes and pycodestyle error rules.
+target-version = "py310"
+line-length = 120
+
+[lint]
+select = ["E4", "E7", "E9", "F"]
+
+[lint.per-file-ignores]
+# Profiling scripts adjust sys.path before importing the package
+"tests/profile_*.py" = ["E402"]
