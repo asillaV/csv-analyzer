@@ -3,7 +3,6 @@ Benchmark per misurare l'impatto dell'ottimizzazione dtype (Issue #53).
 
 Esegui con: python3 tests/benchmark_dtype_optimization.py
 """
-import sys
 import numpy as np
 import pandas as pd
 

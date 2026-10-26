@@ -3,7 +3,6 @@ Test per preset_manager module (Issue #36).
 """
 
 import pytest
-from pathlib import Path
 import shutil
 
 from core.preset_manager import (

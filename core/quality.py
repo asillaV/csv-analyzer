@@ -10,7 +10,7 @@ Returns a compact report for UI display without blocking workflow.
 """
 
 from dataclasses import dataclass, field
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional
 import pandas as pd
 import numpy as np
 
