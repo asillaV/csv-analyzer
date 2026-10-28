@@ -34,6 +34,13 @@ KNOWN_REFERENCE_BUGS: Dict[str, str] = {
     "no_header": "la prima riga di dati viene usata come intestazione (riga persa)",
 }
 
+# Singole colonne in cui il riferimento sbaglia: escluse dal confronto dei valori.
+# Il loader storico toglie i caratteri non numerici da "1.#IO"/"-1.#R" e, se i
+# token superano ~5% della colonna, li trasforma in ±1.0; il nuovo dà sempre NA.
+KNOWN_REFERENCE_BUG_COLUMNS: Dict[str, set] = {
+    "utf16le_excel_like": {"Offset [V]"},
+}
+
 PARITY_CASES = [name for name in CORPUS if name not in KNOWN_REFERENCE_BUGS]
 
 LOCAL_CSV_DIR = Path(__file__).resolve().parents[1] / "tests_csv"
@@ -74,7 +81,9 @@ def test_reference_loads_corpus(corpus_paths, name):
 @pytest.mark.parametrize("name", PARITY_CASES)
 def test_ingest_parity(corpus_paths, name):
     path = corpus_paths[name]
-    assert_load_equivalent(load_reference(path), _load_new(path))
+    assert_load_equivalent(
+        load_reference(path), _load_new(path), KNOWN_REFERENCE_BUG_COLUMNS.get(name, ())
+    )
 
 
 @needs_ingest

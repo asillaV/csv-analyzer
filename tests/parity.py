@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Iterable, Optional
 
 import numpy as np
 import pandas as pd
@@ -37,9 +37,9 @@ Loader = Callable[[Path], LoadOutcome]
 
 
 def load_reference(path: Path, apply_cleaning: bool = True) -> LoadOutcome:
-    """Caricamento con il percorso di produzione attuale."""
+    """Caricamento con il ramo standard del loader storico (oracolo di parità)."""
     from core.analyzer import analyze_csv
-    from core.loader_optimized import load_csv
+    from core.loader import load_csv
 
     try:
         meta = analyze_csv(str(path))
@@ -97,8 +97,15 @@ def _column_values_equal(name: str, ref: pd.Series, new: pd.Series) -> Optional[
     return None
 
 
-def compare_outcomes(ref: LoadOutcome, new: LoadOutcome) -> list[str]:
-    """Restituisce l'elenco delle differenze (vuoto = equivalenti)."""
+def compare_outcomes(
+    ref: LoadOutcome, new: LoadOutcome, ignore_columns: Iterable[str] = ()
+) -> list[str]:
+    """Restituisce l'elenco delle differenze (vuoto = equivalenti).
+
+    `ignore_columns`: colonne in cui il riferimento ha un difetto noto; ne
+    vengono confrontati solo nome e posizione.
+    """
+    ignored = set(ignore_columns)
     if ref.error is not None or new.error is not None:
         if ref.error is not None and new.error is not None:
             return []
@@ -113,6 +120,8 @@ def compare_outcomes(ref: LoadOutcome, new: LoadOutcome) -> list[str]:
     if ref.df.shape != new.df.shape:
         return [f"forma diversa: {ref.df.shape} vs {new.df.shape}"]
     for name in ref.df.columns:
+        if name in ignored:
+            continue
         if str(ref.df[name].dtype) != str(new.df[name].dtype):
             diffs.append(f"colonna {name!r}: dtype {ref.df[name].dtype} vs {new.df[name].dtype}")
             continue
@@ -121,7 +130,9 @@ def compare_outcomes(ref: LoadOutcome, new: LoadOutcome) -> list[str]:
             diffs.append(msg)
 
     if ref.report is not None and new.report is not None:
-        if list(ref.report.numeric_columns) != list(new.report.numeric_columns):
+        ref_numeric = [c for c in ref.report.numeric_columns if c not in ignored]
+        new_numeric = [c for c in new.report.numeric_columns if c not in ignored]
+        if ref_numeric != new_numeric:
             diffs.append(
                 f"colonne numeriche diverse: {ref.report.numeric_columns} vs {new.report.numeric_columns}"
             )
@@ -131,6 +142,8 @@ def compare_outcomes(ref: LoadOutcome, new: LoadOutcome) -> list[str]:
     return diffs
 
 
-def assert_load_equivalent(ref: LoadOutcome, new: LoadOutcome) -> None:
-    diffs = compare_outcomes(ref, new)
+def assert_load_equivalent(
+    ref: LoadOutcome, new: LoadOutcome, ignore_columns: Iterable[str] = ()
+) -> None:
+    diffs = compare_outcomes(ref, new, ignore_columns)
     assert not diffs, "Caricamento non equivalente:\n  - " + "\n  - ".join(diffs)

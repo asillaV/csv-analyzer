@@ -126,68 +126,13 @@ def clean_dataframe(
 
     df_out = df_input.copy()
 
-    for column in df_input.columns:
-        series = df_input[column]
-        series_str = series.astype("string", copy=False)
-        total = len(series_str)
-
-        series_filled = series_str.fillna("")
-        stripped = series_filled.str.strip()
-        candidate_mask = stripped != ""
-        candidate_count = int(candidate_mask.sum())
-
-        if candidate_count == 0:
-            columns_report[column] = ColumnReport(
-                total=total,
-                candidate_numeric=0,
-                converted=0,
-                non_numeric=0,
-                conversion_rate=0.0,
-                dtype=str(series.dtype),
-                applied=False,
-                examples_non_numeric=[],
-            )
-            continue
-
-        numeric_series = _convert_series(series_str, suggestion.decimal, suggestion.thousands)
-        lower_values = stripped.str.lower()
-        special_nan_mask = lower_values.isin({"nan", "inf", "+inf", "-inf", "infinity"})
-        converted_mask = candidate_mask & (numeric_series.notna() | special_nan_mask)
-        converted_count = int(converted_mask.sum())
-        non_numeric_count = int((candidate_mask & ~converted_mask).sum())
-        conversion_rate = converted_count / candidate_count if candidate_count else 0.0
-
-        examples = _collect_examples(
-            series_str, candidate_mask, converted_mask, limit=MAX_NON_NUMERIC_EXAMPLES
-        )
-
-        should_apply = False
-        if apply and candidate_count > 0:
-            if converted_count == candidate_count:
-                should_apply = True
-            elif (
-                candidate_count >= MIN_CANDIDATE_VALUES
-                and conversion_rate >= MIN_CONVERSION_RATE
-            ):
-                should_apply = True
-
-        if should_apply:
+    for position, column in enumerate(df_input.columns):
+        series = df_input.iloc[:, position]
+        numeric_series, column_report = clean_column(series, suggestion, apply)
+        columns_report[column] = column_report
+        if numeric_series is not None:
             numeric_columns.append(column)
             df_out[column] = numeric_series
-            dtype_repr = str(df_out[column].dtype)
-        else:
-            dtype_repr = str(series.dtype)
-
-        columns_report[column] = ColumnReport(
-            total=total,
-            candidate_numeric=candidate_count,
-            converted=converted_count,
-            non_numeric=non_numeric_count,
-            conversion_rate=conversion_rate,
-            dtype=dtype_repr,
-            applied=should_apply,
-            examples_non_numeric=examples,
-        )
 
     rows_all_nan = _detect_all_nan_rows(df_input, df_out, numeric_columns)
 
@@ -201,6 +146,70 @@ def clean_dataframe(
     )
 
     return SanitizedResult(df=df_out, report=report)
+
+
+def clean_column(
+    series: pd.Series, suggestion: FormatSuggestion, apply: bool = True
+) -> Tuple[Optional[pd.Series], ColumnReport]:
+    """
+    Pulisce una singola colonna di stringhe con il formato già stimato.
+
+    Restituisce (serie numerica Float64, report) se la colonna viene convertita,
+    altrimenti (None, report) e la colonna va lasciata com'è.
+    """
+    series_str = series.astype("string", copy=False)
+    total = len(series_str)
+
+    series_filled = series_str.fillna("")
+    stripped = series_filled.str.strip()
+    candidate_mask = stripped != ""
+    candidate_count = int(candidate_mask.sum())
+
+    if candidate_count == 0:
+        return None, ColumnReport(
+            total=total,
+            candidate_numeric=0,
+            converted=0,
+            non_numeric=0,
+            conversion_rate=0.0,
+            dtype=str(series.dtype),
+            applied=False,
+            examples_non_numeric=[],
+        )
+
+    numeric_series = _convert_series(series_str, suggestion.decimal, suggestion.thousands)
+    lower_values = stripped.str.lower()
+    special_nan_mask = lower_values.isin({"nan", "inf", "+inf", "-inf", "infinity"})
+    converted_mask = candidate_mask & (numeric_series.notna() | special_nan_mask)
+    converted_count = int(converted_mask.sum())
+    non_numeric_count = int((candidate_mask & ~converted_mask).sum())
+    conversion_rate = converted_count / candidate_count if candidate_count else 0.0
+
+    examples = _collect_examples(
+        series_str, candidate_mask, converted_mask, limit=MAX_NON_NUMERIC_EXAMPLES
+    )
+
+    should_apply = False
+    if apply and candidate_count > 0:
+        if converted_count == candidate_count:
+            should_apply = True
+        elif (
+            candidate_count >= MIN_CANDIDATE_VALUES
+            and conversion_rate >= MIN_CONVERSION_RATE
+        ):
+            should_apply = True
+
+    report = ColumnReport(
+        total=total,
+        candidate_numeric=candidate_count,
+        converted=converted_count,
+        non_numeric=non_numeric_count,
+        conversion_rate=conversion_rate,
+        dtype=str(numeric_series.dtype) if should_apply else str(series.dtype),
+        applied=should_apply,
+        examples_non_numeric=examples,
+    )
+    return (numeric_series if should_apply else None), report
 
 
 def suggest_number_format(

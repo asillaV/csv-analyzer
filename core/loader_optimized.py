@@ -333,17 +333,21 @@ def load_csv(
     thousands: Optional[str] = None,
     use_optimization: bool = True,
     progress_callback: Optional[Callable[[LoadProgress], None]] = None,
+    use_fast_ingest: bool = True,
 ) -> pd.DataFrame | Tuple[pd.DataFrame, CleaningReport]:
     """
     Versione ottimizzata di load_csv con auto-detection di strategia ottimale.
 
     Strategia di caricamento:
-    - File piccoli (< 50 MB, < 100k righe): caricamento standard (compatibilità)
-    - File grandi: caricamento chunked per ridurre RAM
+    - Se pyarrow è disponibile: core.ingest (lettura Arrow, stesso risultato del
+      loader standard, molto più veloce e con meno RAM)
+    - Altrimenti, file piccoli (< 50 MB, < 100k righe): caricamento standard
+    - Altrimenti, file grandi: caricamento chunked per ridurre RAM
 
     Args:
         use_optimization: Se False, usa loader legacy (compatibilità)
         progress_callback: Callback per progress updates
+        use_fast_ingest: Se False, salta core.ingest (benchmark e debug)
         Altri args: come loader.py
 
     Returns:
@@ -355,6 +359,26 @@ def load_csv(
         msg = f"File non trovato: {path}"
         log.error(msg)
         raise FileNotFoundError(msg)
+
+    if use_optimization and use_fast_ingest and usecols is None:
+        from . import ingest
+
+        if ingest._ARROW_OK:
+            log.info("Using FAST ingest (pyarrow)")
+            known_meta = None
+            if encoding is not None or delimiter is not None:
+                known_meta = {"encoding": encoding, "delimiter": delimiter, "header": header}
+            result = ingest.load(
+                path,
+                meta=known_meta,
+                apply_cleaning=apply_cleaning,
+                decimal=decimal,
+                thousands=thousands,
+                progress_callback=progress_callback,
+            )
+            if return_details:
+                return result.df, result.report
+            return result.df
 
     # Determina strategia
     use_sampling, reason = should_use_sampling(path)

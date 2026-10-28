@@ -92,6 +92,7 @@ def _measure(loader: str, path: Path) -> Dict[str, Any]:
                 header=meta.get("header"),
                 apply_cleaning=True,
                 return_details=True,
+                use_fast_ingest=False,
             )
         else:
             from core import ingest

@@ -70,6 +70,23 @@ Ogni fase si chiude con test verdi (`pytest`, soglia 80%), `ruff check core/ tes
 - `progress_callback` mantenuto (fasi: lettura, conversione, cache).
 - Integrazione: `loader_optimized.load_csv` delega a `ingest` quando pyarrow è disponibile; altrimenti percorso attuale.
 
+### Esito F1
+
+- `core/ingest.py` implementato e collegato in `loader_optimized.load_csv` (parametro `use_fast_ingest=False` per tornare al vecchio percorso). `csv_cleaner.clean_column` estratto da `clean_dataframe` senza cambiarne il comportamento, riusato per le colonne che Arrow non converte in modo pulito.
+- Parità: tutto il corpus e i 14 CSV locali di `tests_csv/` identici al loader standard, salvo i difetti noti voluti (cp1252, senza intestazione, token MSVC). Sulla fetta reale le sole differenze sono `Pressure [bar]` e `Pressure_R [bar]`, colonne fatte quasi solo di `1.#IO` che il vecchio loader trasformava in un finto `1.0`.
+- Trovato e aggirato un difetto di pyarrow 21: `fill_null(...).to_numpy()` restituisce valori errati (test di regressione in `tests/test_ingest.py`).
+
+| File | Prima | Dopo F1 | Picco RAM prima → dopo |
+|---|---|---|---|
+| `bench_large_500k.csv` (170 MB) | 24,2 s | **1,3 s** | 1,55 → 1,07 GB |
+| Fetta reale 300 MB | 42,8 s | **2,4 s** | 2,09 → 1,35 GB |
+
+**Vincolo emerso sul file completo.** Il PC di sviluppo ha 7,7 GB di RAM. Il solo DataFrame finale del file reale (≈ 3,5 M × 132 `Float64`) occupa ≈ 4,1 GB, a cui si somma il testo letto: il file intero non entra in memoria con nessun loader. Per il file completo servono quindi, in F2–F3:
+- lettura per colonne: CSV → Parquet una volta sola (in streaming, a blocchi), poi caricamento in RAM solo delle colonne scelte (X + Y selezionate);
+- valutare `float32` per le colonne di misura (dimezza la RAM, precisione ≈ 7 cifre).
+
+L'obiettivo "file reale 2,9 GB ≤ 45 s" si intende quindi come conversione in Parquet + apertura delle colonne scelte.
+
 ### F2 — Cache persistente (`core/dataset_cache.py`)
 - Posizione: `user_data_dir()/cache/` (da sorgente: root progetto, già in `.gitignore` da aggiungere).
 - Chiave: percorso assoluto + dimensione + mtime + hash veloce (primi e ultimi 4 MB) + versione del formato di ingest + opzioni di pulizia/override decimale. Per i file arrivati da upload: SHA-1 dei byte, come oggi.
