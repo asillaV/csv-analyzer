@@ -2,8 +2,6 @@
 Script per profilare in dettaglio le funzioni interne della pipeline.
 """
 import time
-from pathlib import Path
-import pandas as pd
 
 # Monkey-patch per instrumentare le funzioni
 original_functions = {}

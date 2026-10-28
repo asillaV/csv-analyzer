@@ -3,7 +3,6 @@ Test per core.settings: merge config + override utente, persistenza,
 rilevamento hardware e profili di prestazioni.
 """
 
-import json
 
 import pytest
 

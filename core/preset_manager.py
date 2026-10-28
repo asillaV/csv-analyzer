@@ -7,7 +7,7 @@ Issue #36: Permette agli utenti di salvare e riutilizzare configurazioni di anal
 from __future__ import annotations
 import json
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 from dataclasses import asdict
 from datetime import datetime
 

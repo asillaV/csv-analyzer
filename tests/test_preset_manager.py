@@ -3,8 +3,6 @@ Test per preset_manager module (Issue #36).
 """
 
 import pytest
-from pathlib import Path
-import shutil
 
 from core.preset_manager import (
     save_preset,
@@ -15,7 +13,6 @@ from core.preset_manager import (
     get_preset_info,
     create_default_presets,
     PresetError,
-    PRESETS_DIR,
     _sanitize_name,
 )
 from core.signal_tools import FilterSpec, FFTSpec

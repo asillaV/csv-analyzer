@@ -97,6 +97,8 @@ if confidence > 0.95 and sample_count > 100:
 
 ### `core/loader_v2.py`
 
+> Nota (ottobre 2026): questo modulo non era usato dall'applicazione e non era più funzionante (riferimenti a nomi non definiti); è stato rimosso. Il loader in uso è `core/loader_optimized.py`. Il codice resta nella cronologia git.
+
 Loader ultra-ottimizzato con:
 - ✅ Engine Pyarrow
 - ✅ Pulizia parallelizzata (ThreadPoolExecutor)
