@@ -90,3 +90,4 @@ test_correctness.py
 test_reset_functionality.md
 # ===== Cache Parquet dei CSV convertiti (core/dataset_cache.py) =====
 /cache/
+/recent_files.json

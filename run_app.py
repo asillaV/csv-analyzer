@@ -60,6 +60,9 @@ def main() -> None:
     os.environ.setdefault("STREAMLIT_GLOBAL_DEVELOPMENT_MODE", "false")
     # Forza bind su localhost (anche se l'utente ha variabili d'ambiente residue).
     os.environ["STREAMLIT_SERVER_ADDRESS"] = SERVER_ADDRESS
+    # Server e browser sono sullo stesso PC: l'app può aprire i file direttamente
+    # dal disco (core.local_files.is_desktop_mode) invece di caricarli via upload.
+    os.environ["ANALIZZATORE_DESKTOP"] = "1"
 
     _prepare_user_dirs()
 

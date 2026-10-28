@@ -8,6 +8,7 @@ import multiprocessing as mp
 import os
 import queue
 import tempfile
+import time
 from functools import lru_cache
 from pathlib import Path
 from types import SimpleNamespace
@@ -27,6 +28,7 @@ from core.csv_cleaner import CleaningReport
 from core import dataset_cache
 from core.csv_parser_worker import _parsing_worker
 from core.paths import resource_path
+from core import local_files
 from core import settings as app_settings
 
 # Import condizionale: usa loader ottimizzato se configurato
@@ -162,16 +164,21 @@ def _check_size_limit(size_bytes: int, limits: Dict[str, float]) -> Optional[str
 
 def _check_dataframe_limits(df: pd.DataFrame, limits: Dict[str, float]) -> Optional[str]:
     """Verifica che il dataframe rispetti i limiti di righe e colonne."""
+    return _check_shape_limits(len(df), len(df.columns), limits)
+
+
+def _check_shape_limits(n_rows: int, n_cols: int, limits: Dict[str, float]) -> Optional[str]:
+    """Limiti di righe e colonne, anche per dataset non caricati interamente in RAM."""
     max_rows = int(limits["max_rows"])
     max_cols = int(limits["max_cols"])
-    if len(df) > max_rows:
+    if n_rows > max_rows:
         return (
-            f"Dataset troppo grande: {len(df):,} righe. "
+            f"Dataset troppo grande: {n_rows:,} righe. "
             f"Limite massimo consentito: {max_rows:,}."
         )
-    if len(df.columns) > max_cols:
+    if n_cols > max_cols:
         return (
-            f"Dataset con troppe colonne: {len(df.columns):,}. "
+            f"Dataset con troppe colonne: {n_cols:,}. "
             f"Limite massimo consentito: {max_cols:,}."
         )
     return None
@@ -184,6 +191,185 @@ def _clear_cached_dataset() -> None:
     st.session_state.pop("_cached_meta", None)
     st.session_state.pop("_cached_file_sig", None)
     st.session_state.pop("_cached_apply_cleaning", None)
+    st.session_state.pop("_cached_dataset", None)
+    st.session_state.pop("_cached_source_id", None)
+    st.session_state.pop("_cached_df_dir", None)
+    st.session_state.pop("_lazy_df", None)
+    st.session_state.pop("_lazy_df_key", None)
+
+
+def _select_local_file(path: Path) -> None:
+    """Apre un file dal disco al posto di upload/sample e ricarica la pagina."""
+    st.session_state["_local_path"] = str(path)
+    st.session_state["_clear_file_uploader"] = True
+    st.session_state.pop("_sample_bytes", None)
+    st.session_state.pop("_sample_file_name", None)
+    _clear_cached_dataset()
+    _invalidate_result_caches()
+    local_files.add_recent_file(path)
+    st.rerun()
+
+
+def _render_local_file_picker() -> None:
+    """Versione desktop: apertura di un CSV direttamente dal disco (niente upload)."""
+    st.markdown("**Oppure apri un file dal PC** — consigliato per i file grandi")
+    recent = local_files.recent_files()
+    b1, b2, b3 = st.columns([1, 3, 1])
+    with b1:
+        if st.button("Sfoglia...", key="local_browse_btn", use_container_width=True):
+            initial = str(Path(recent[0]).parent) if recent else None
+            chosen = local_files.pick_csv_file(initial)
+            if chosen:
+                _select_local_file(Path(chosen))
+    with b2:
+        typed = st.text_input(
+            "Percorso del file",
+            key="local_path_input",
+            placeholder=r"oppure incolla il percorso, es. E:\Dati\misura.csv",
+            label_visibility="collapsed",
+        )
+    with b3:
+        if st.button("Apri percorso", key="local_open_path_btn", use_container_width=True):
+            path = local_files.normalize_user_path(typed)
+            if path is None:
+                st.error("File non trovato: controlla il percorso.")
+            else:
+                _select_local_file(path)
+    if recent:
+        r1, r2 = st.columns([4, 1])
+        with r1:
+            chosen_recent = st.selectbox(
+                "File recenti",
+                ["—"] + recent,
+                key="local_recent_select",
+                label_visibility="collapsed",
+            )
+        with r2:
+            if st.button("Apri recente", key="local_open_recent_btn", disabled=chosen_recent == "—", use_container_width=True):
+                _select_local_file(Path(chosen_recent))
+
+
+def _run_and_render_quality(df: pd.DataFrame, file_sig: FileSignature) -> None:
+    """Controlli qualità (con cache) sulle colonne di `df` e badge con i dettagli."""
+    _init_result_caches()
+    quality_config = _load_quality_config()
+    try:
+        all_cols = list(df.columns)
+        _quality_key = (
+            file_sig,
+            tuple(all_cols),
+            (quality_config['gap_factor_k'], quality_config['spike_z'], quality_config['min_points']),
+        )
+        quality_report = st.session_state["_quality_cache"].get(_quality_key)
+        if quality_report is None:
+            quality_report = run_quality_checks(
+                df=df,
+                x_col=None,
+                y_cols=all_cols,
+                gap_factor_k=quality_config['gap_factor_k'],
+                spike_z=quality_config['spike_z'],
+                min_points=quality_config['min_points'],
+                max_examples=quality_config['max_examples']
+            )
+            _qcache = st.session_state["_quality_cache"]
+            if len(_qcache) >= MAX_QUALITY_CACHE_SIZE:
+                _qcache.pop(next(iter(_qcache)))
+            _qcache[_quality_key] = quality_report
+            quality_logger = LogManager(component="quality").get_logger()
+            quality_logger.info(quality_report.get_summary())
+
+        _render_quality_badge_and_details(quality_report)
+    except Exception as e:
+        st.warning(f"Impossibile eseguire controlli qualità: {e}")
+
+
+# ---------------------- Dataset su disco (Parte 1, F3) ---------------------- #
+# Oltre questa quota della RAM disponibile il DataFrame completo non viene
+# caricato: si leggono dalla cache Parquet solo X e le Y selezionate.
+LAZY_RAM_FRACTION = 0.3
+
+
+def _lazy_threshold_bytes() -> int:
+    try:
+        import psutil
+
+        available = psutil.virtual_memory().available
+    except Exception:
+        available = 2 * 1024**3
+    return int(available * LAZY_RAM_FRACTION)
+
+
+def _should_load_lazily(dataset: "dataset_cache.CachedDataset") -> bool:
+    return dataset.estimated_memory_bytes() > _lazy_threshold_bytes()
+
+
+def _needed_columns(x_col: Optional[str], y_cols: Sequence[str], available: Sequence[str]) -> List[str]:
+    """Colonne da caricare per l'analisi: X (se scelta) e le Y, senza duplicati."""
+    wanted = ([x_col] if x_col and x_col != "—" else []) + list(y_cols)
+    seen: set = set()
+    return [c for c in wanted if c in available and not (c in seen or seen.add(c))]
+
+
+def _path_file_signature(dataset: "dataset_cache.CachedDataset", size: int) -> FileSignature:
+    """Firma di un file aperto da disco: la voce di cache identifica il contenuto."""
+    return (_ensure_session_id(), size, dataset.directory.name[:16])
+
+
+def _open_dataset_with_progress(
+    path: Path, apply_cleaning: bool, timeout_s: float, content_key: Optional[str] = None
+) -> "dataset_cache.CachedDataset":
+    """Apre (e se serve converte) il CSV mostrando l'avanzamento.
+
+    Il timeout è controllato tra un blocco e l'altro: superato, la conversione
+    si interrompe e la voce di cache parziale viene eliminata.
+    """
+    bar = st.progress(0.0, text="Preparazione del file...")
+    start = time.monotonic()
+
+    def on_progress(progress: Any) -> None:
+        if time.monotonic() - start > timeout_s:
+            raise TimeoutError(f"Caricamento del CSV oltre il tempo massimo di {timeout_s:.0f}s.")
+        if progress.phase == "loading" and progress.total > 0:
+            bar.progress(min(progress.current / progress.total, 1.0), text=f"Conversione: {progress.message}")
+        elif progress.phase == "cleaning" and progress.total > 0:
+            bar.progress(min(progress.current / progress.total, 1.0), text="Pulizia colonne particolari...")
+
+    try:
+        return dataset_cache.open_dataset(
+            path,
+            apply_cleaning=apply_cleaning,
+            content_key=content_key,
+            progress_callback=on_progress,
+            max_bytes=dataset_cache.max_bytes_from_config(),
+        )
+    finally:
+        bar.empty()
+
+
+def _open_bytes_dataset(file_bytes: bytes, apply_cleaning: bool, timeout_s: float) -> "dataset_cache.CachedDataset":
+    """Upload/sample: file temporaneo solo finché serve a creare la voce di cache."""
+    fd, tmp_name = tempfile.mkstemp(prefix="csv_upload_", suffix=".csv")
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as tmp_file:
+            tmp_file.write(file_bytes)
+        return _open_dataset_with_progress(
+            tmp_path, apply_cleaning, timeout_s, content_key=hashlib.sha1(file_bytes).hexdigest()
+        )
+    finally:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _load_dataset_columns(dataset: "dataset_cache.CachedDataset", columns: Sequence[str]) -> pd.DataFrame:
+    """Colonne scelte dalla cache Parquet, tenute in sessione finché la scelta non cambia."""
+    key = (str(dataset.directory), tuple(columns))
+    if st.session_state.get("_lazy_df_key") != key:
+        st.session_state["_lazy_df"] = dataset.load(list(columns))
+        st.session_state["_lazy_df_key"] = key
+    return st.session_state["_lazy_df"].copy()
 
 
 def _parse_csv_in_thread(file_bytes: bytes, apply_cleaning: bool) -> Tuple[pd.DataFrame, CleaningReport, Dict[str, Any]]:
@@ -1667,6 +1853,8 @@ def _render_main_app():
             help=sample_help,
         )
         st.markdown("</div>", unsafe_allow_html=True)
+        if local_files.is_desktop_mode():
+            _render_local_file_picker()
 
     if sample_clicked:
         if sample_available:
@@ -1676,13 +1864,10 @@ def _render_main_app():
                 st.session_state["_sample_file_name"] = SAMPLE_CSV_PATH.name
                 st.session_state["_clear_file_uploader"] = True
                 st.session_state.pop("_sample_error", None)
+                st.session_state.pop("_local_path", None)
 
                 # FIX #46: Libera TUTTA la cache upload prima del rerun
-                st.session_state.pop("_cached_df", None)
-                st.session_state.pop("_cached_cleaning_report", None)
-                st.session_state.pop("_cached_meta", None)
-                st.session_state.pop("_cached_file_sig", None)
-                st.session_state.pop("_cached_apply_cleaning", None)
+                _clear_cached_dataset()
                 _invalidate_result_caches()  # Pulisce filter/FFT cache
 
                 st.rerun()
@@ -1704,10 +1889,31 @@ def _render_main_app():
     if upload is not None:
         st.session_state.pop("_sample_bytes", None)
         st.session_state.pop("_sample_file_name", None)
+        st.session_state.pop("_local_path", None)
         sample_bytes = None
         sample_name = SAMPLE_CSV_PATH.name
 
+    # File aperto direttamente dal disco (versione desktop)
+    local_path: Optional[Path] = None
+    if st.session_state.get("_local_path"):
+        candidate = Path(st.session_state["_local_path"])
+        if candidate.is_file():
+            local_path = candidate
+            sample_bytes = None
+            lc1, lc2 = st.columns([4, 1])
+            lc1.caption(f"File aperto dal PC: {local_path}")
+            if lc2.button("Chiudi file", key="local_close_btn", use_container_width=True):
+                st.session_state.pop("_local_path", None)
+                _clear_cached_dataset()
+                _invalidate_result_caches()
+                st.rerun()
+        else:
+            st.session_state.pop("_local_path", None)
+            st.warning(f"Il file non esiste più: {candidate}")
+
     current_file: Optional[Any] = upload
+    if current_file is None and local_path is not None:
+        current_file = SimpleNamespace(name=local_path.name, size=local_path.stat().st_size)
     if current_file is None and sample_bytes is not None:
         current_file = SimpleNamespace(name=sample_name, size=len(sample_bytes))
 
@@ -1720,7 +1926,7 @@ def _render_main_app():
         st.info(hint)
         return
 
-    using_sample = upload is None
+    using_sample = upload is None and local_path is None
 
     limits = _load_limits_config()
 
@@ -1732,10 +1938,20 @@ def _render_main_app():
     )
 
     cleaning_report: Optional[CleaningReport] = None
-    meta: Dict[str, Any]
-    file_bytes: bytes
+    meta: Dict[str, Any] = {}
+    file_bytes: Optional[bytes] = None
+    # Cache su disco (Parquet): sempre per i file aperti dal PC, e per upload/sample
+    # quando il loader ottimizzato è attivo. Con file grandi `df` resta None fino
+    # alla scelta di X/Y: si caricano solo quelle colonne (vedi _load_dataset_columns).
+    dataset: Optional["dataset_cache.CachedDataset"] = None
+    use_dataset = local_path is not None or LOADER_TYPE == "optimized"
+    source_size = 0
 
-    if using_sample:
+    if local_path is not None:
+        # Nessun limite di dimensione: il file si legge dal disco a blocchi e non
+        # sta mai tutto in RAM (restano i limiti di righe e colonne).
+        source_size = local_path.stat().st_size
+    elif using_sample:
         if sample_bytes is None:
             st.error("Sample non disponibile.")
             return
@@ -1759,52 +1975,90 @@ def _render_main_app():
         file_bytes = upload_bytes
         upload.seek(0)
 
-    file_sig = _build_file_signature(file_bytes)
+    file_sig: FileSignature = _build_file_signature(file_bytes) if file_bytes is not None else ("", 0, "")
 
-    cached_df = st.session_state.get("_cached_df")
-    cached_report = st.session_state.get("_cached_cleaning_report")
-    cached_meta = st.session_state.get("_cached_meta")
-    cache_hit = (
-        st.session_state.get("_cached_file_sig") == file_sig
-        and st.session_state.get("_cached_apply_cleaning") == apply_cleaning
-        and cached_df is not None
-        and cached_report is not None
-        and cached_meta is not None
-    )
-
-    df: pd.DataFrame
+    df: Optional[pd.DataFrame] = None
+    timeout_s = max(limits["parse_timeout_s"], 1.0)
+    from dataclasses import replace as dataclass_replace
 
     try:
-        with st.spinner("Analisi CSV..."):
-            if cache_hit:
-                # FIX ISSUE #51: Proteggi cache da mutazioni con .copy()
-                df = cached_df.copy()  # type: ignore[assignment,union-attr]
-                # CleaningReport è immutabile (dataclass con campi readonly), shallow copy sufficiente
-                from dataclasses import replace as dataclass_replace
-                cleaning_report = dataclass_replace(cached_report)  # type: ignore[assignment,arg-type]
-                meta = dict(cached_meta)  # type: ignore[arg-type]
-                limit_error = _check_dataframe_limits(df, limits)
-                if limit_error:
-                    _clear_cached_dataset()
-                    st.error(limit_error)
-                    st.stop()
+        if use_dataset:
+            if local_path is not None:
+                stat = local_path.stat()
+                source_id: Any = ("path", str(local_path.resolve()), stat.st_size, stat.st_mtime_ns)
             else:
-                timeout_s = max(limits["parse_timeout_s"], 1.0)
-                df, cleaning_report, meta = _parse_csv_with_timeout(
-                    file_bytes=file_bytes,
-                    apply_cleaning=apply_cleaning,
-                    timeout_s=timeout_s,
-                )
-                limit_error = _check_dataframe_limits(df, limits)
-                if limit_error:
-                    _clear_cached_dataset()
-                    st.error(limit_error)
-                    st.stop()
-                st.session_state["_cached_df"] = df
-                st.session_state["_cached_cleaning_report"] = cleaning_report
-                st.session_state["_cached_meta"] = dict(meta)
-                st.session_state["_cached_file_sig"] = file_sig
-                st.session_state["_cached_apply_cleaning"] = apply_cleaning
+                source_id = ("bytes", file_sig[1], file_sig[2])
+            cached_dataset = st.session_state.get("_cached_dataset")
+            if (
+                cached_dataset is not None
+                and st.session_state.get("_cached_source_id") == (source_id, apply_cleaning)
+                and cached_dataset.directory.exists()
+            ):
+                dataset = cached_dataset
+            else:
+                _clear_cached_dataset()
+                if local_path is not None:
+                    dataset = _open_dataset_with_progress(local_path, apply_cleaning, timeout_s)
+                else:
+                    dataset = _open_bytes_dataset(file_bytes, apply_cleaning, timeout_s)
+                st.session_state["_cached_dataset"] = dataset
+                st.session_state["_cached_source_id"] = (source_id, apply_cleaning)
+            if local_path is not None:
+                file_sig = _path_file_signature(dataset, source_size)
+            limit_error = _check_shape_limits(dataset.num_rows, len(dataset.columns), limits)
+            if limit_error:
+                _clear_cached_dataset()
+                st.error(limit_error)
+                st.stop()
+            cleaning_report = dataclass_replace(dataset.report)
+            meta = dict(dataset.meta)
+            if not _should_load_lazily(dataset):
+                if st.session_state.get("_cached_df_dir") != str(dataset.directory) or "_cached_df" not in st.session_state:
+                    with st.spinner("Caricamento dati..."):
+                        st.session_state["_cached_df"] = dataset.load()
+                    st.session_state["_cached_df_dir"] = str(dataset.directory)
+                # FIX ISSUE #51: Proteggi cache da mutazioni con .copy()
+                df = st.session_state["_cached_df"].copy()
+        else:
+            assert file_bytes is not None
+            cached_df = st.session_state.get("_cached_df")
+            cached_report = st.session_state.get("_cached_cleaning_report")
+            cached_meta = st.session_state.get("_cached_meta")
+            cache_hit = (
+                st.session_state.get("_cached_file_sig") == file_sig
+                and st.session_state.get("_cached_apply_cleaning") == apply_cleaning
+                and cached_df is not None
+                and cached_report is not None
+                and cached_meta is not None
+            )
+            with st.spinner("Analisi CSV..."):
+                if cache_hit:
+                    # FIX ISSUE #51: Proteggi cache da mutazioni con .copy()
+                    df = cached_df.copy()  # type: ignore[assignment,union-attr]
+                    # CleaningReport è immutabile (dataclass con campi readonly), shallow copy sufficiente
+                    cleaning_report = dataclass_replace(cached_report)  # type: ignore[assignment,arg-type]
+                    meta = dict(cached_meta)  # type: ignore[arg-type]
+                    limit_error = _check_dataframe_limits(df, limits)
+                    if limit_error:
+                        _clear_cached_dataset()
+                        st.error(limit_error)
+                        st.stop()
+                else:
+                    df, cleaning_report, meta = _parse_csv_with_timeout(
+                        file_bytes=file_bytes,
+                        apply_cleaning=apply_cleaning,
+                        timeout_s=timeout_s,
+                    )
+                    limit_error = _check_dataframe_limits(df, limits)
+                    if limit_error:
+                        _clear_cached_dataset()
+                        st.error(limit_error)
+                        st.stop()
+                    st.session_state["_cached_df"] = df
+                    st.session_state["_cached_cleaning_report"] = cleaning_report
+                    st.session_state["_cached_meta"] = dict(meta)
+                    st.session_state["_cached_file_sig"] = file_sig
+                    st.session_state["_cached_apply_cleaning"] = apply_cleaning
     except TimeoutError as exc:
         st.error(str(exc))
         return
@@ -1816,19 +2070,21 @@ def _render_main_app():
     except ValueError as ve:
         st.error(str(ve))
         return
-    except Exception as exc:
+    except Exception:
         # FIX ISSUE #54: Messaggio generico utente, log tecnico con traceback
         st.error("Errore nel parsing del CSV. Verifica il formato del file.")
         logger.error(
             "CSV parsing failed",
             exc_info=True,
             extra={
-                "file_size": len(file_bytes),
+                "file_size": len(file_bytes) if file_bytes is not None else source_size,
                 "apply_cleaning": apply_cleaning,
                 "session_id": st.session_state.get("_dataset_id", "")[:8]
             }
         )
         return
+
+    lazy_mode = dataset is not None and df is None
 
     if cleaning_report is None:
         st.error("Impossibile generare il report di sanificazione del CSV.")
@@ -1844,37 +2100,16 @@ def _render_main_app():
     else:
         st.success("File caricato.")
 
-    # Run quality checks (with cache: avoids O(n×cols) ricalcolo ad ogni rerender)
-    _init_result_caches()
-    quality_config = _load_quality_config()
-    try:
-        all_cols = list(df.columns)
-        _quality_key = (
-            file_sig,
-            tuple(all_cols),
-            (quality_config['gap_factor_k'], quality_config['spike_z'], quality_config['min_points']),
+    if lazy_mode:
+        est_gb = dataset.estimated_memory_bytes() / 1024**3
+        st.info(
+            f"File grande ({dataset.num_rows:,} righe x {len(dataset.columns)} colonne, "
+            f"~{est_gb:.1f} GB se caricato tutto): vengono lette solo la colonna X e le Y "
+            "che scegli. I controlli qualità girano su quelle colonne dopo 'Applica / Plot'."
         )
-        quality_report = st.session_state["_quality_cache"].get(_quality_key)
-        if quality_report is None:
-            quality_report = run_quality_checks(
-                df=df,
-                x_col=None,
-                y_cols=all_cols,
-                gap_factor_k=quality_config['gap_factor_k'],
-                spike_z=quality_config['spike_z'],
-                min_points=quality_config['min_points'],
-                max_examples=quality_config['max_examples']
-            )
-            _qcache = st.session_state["_quality_cache"]
-            if len(_qcache) >= MAX_QUALITY_CACHE_SIZE:
-                _qcache.pop(next(iter(_qcache)))
-            _qcache[_quality_key] = quality_report
-            quality_logger = LogManager(component="quality").get_logger()
-            quality_logger.info(quality_report.get_summary())
-
-        _render_quality_badge_and_details(quality_report)
-    except Exception as e:
-        st.warning(f"Impossibile eseguire controlli qualità: {e}")
+    else:
+        # Run quality checks (with cache: avoids O(n×cols) ricalcolo ad ogni rerender)
+        _run_and_render_quality(df, file_sig)
 
     with st.expander("Dettagli dati", expanded=False):
         suggestion = cleaning_report.suggestion
@@ -1919,17 +2154,22 @@ def _render_main_app():
                 f"(prime: {cleaning_report.rows_all_nan_after_clean[:5]})"
             )
 
-        raw_name = getattr(current_file, "name", "dataset.csv")
-        st.download_button(
-            "Scarica CSV originale",
-            data=file_bytes,
-            file_name=raw_name,
-            mime="text/csv",
-        )
+        if file_bytes is not None:
+            raw_name = getattr(current_file, "name", "dataset.csv")
+            st.download_button(
+                "Scarica CSV originale",
+                data=file_bytes,
+                file_name=raw_name,
+                mime="text/csv",
+            )
 
     n_preview = st.slider("Righe di anteprima", 5, 50, 10)
-    _dataframe(df.head(n_preview))
-    total_rows = len(df)
+    if lazy_mode:
+        _dataframe(dataset.load(rows=n_preview))
+        total_rows = dataset.num_rows
+    else:
+        _dataframe(df.head(n_preview))
+        total_rows = len(df)
     st.caption(f"Mostrate le prime {n_preview} righe su {total_rows} totali.")
 
     quality_key = "plot_quality_mode"
@@ -1954,7 +2194,8 @@ def _render_main_app():
         if _button("Reset impostazioni"):
             _reset_all_settings()
 
-    cols = meta.get("columns", list(df.columns))
+    # Nomi reali delle colonne (duplicati già rinominati come "nome.1"), non quelli grezzi dell'analizzatore
+    cols = list(dataset.columns) if dataset is not None else meta.get("columns", list(df.columns))
     fft_available = total_rows >= MIN_ROWS_FOR_FFT
 
     # Preset defaults for Advanced form
@@ -2466,6 +2707,16 @@ def _render_main_app():
     if not y_cols:
         st.warning("Seleziona almeno una colonna Y.")
         return
+
+    if lazy_mode:
+        needed = _needed_columns(x_col, y_cols, dataset.columns)
+        with st.spinner(f"Lettura di {len(needed)} colonne su {len(dataset.columns)}..."):
+            df = _load_dataset_columns(dataset, needed)
+        st.caption(
+            f"Caricate {len(needed)} colonne su {len(dataset.columns)} "
+            f"({df.memory_usage(deep=True).sum() / 2**20:,.0f} MB in RAM)."
+        )
+        _run_and_render_quality(df, file_sig)
 
 
     tab_analisi, tab_report = st.tabs(["Analisi", "Report"])

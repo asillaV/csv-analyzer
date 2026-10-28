@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import codecs
 import hashlib
-import io
 import json
 import os
 import shutil
@@ -38,7 +37,7 @@ import pandas as pd
 
 from . import ingest
 from .analyzer import analyze_csv
-from .csv_cleaner import CleaningReport, ColumnReport, FormatSuggestion
+from .csv_cleaner import CleaningReport, ColumnReport, FormatSuggestion, clean_column
 from .logger import LogManager
 from .paths import user_data_dir
 
@@ -59,7 +58,9 @@ DEFAULT_MAX_GB = 5.0
 HASH_SPAN = 4 << 20
 # Blocchi piccoli in streaming: picco di RAM basso senza perdere velocità.
 STREAM_BLOCK_SIZE = 16 << 20
-TRANSCODE_CHUNK = 4 << 20
+# Stime per decidere se un DataFrame completo sta in RAM.
+FLOAT_BYTES_PER_VALUE = 9  # Float64 nullable: 8 byte + maschera
+STRING_BYTES_PER_VALUE = 60  # stringa Python media di un CSV di misure
 MAIN_FILE = "main.parquet"
 EXTRA_FILE = "extra.parquet"
 META_FILE = "meta.json"
@@ -86,8 +87,19 @@ class CachedDataset:
     def numeric_columns(self) -> List[str]:
         return list(self.report.numeric_columns)
 
-    def load(self, columns: Optional[Sequence[str]] = None) -> pd.DataFrame:
-        """DataFrame con le colonne richieste (tutte se None), nell'ordine richiesto."""
+    def estimated_memory_bytes(self, columns: Optional[Sequence[str]] = None) -> int:
+        """Stima della RAM del DataFrame con queste colonne (tutte se None)."""
+        wanted = self.columns if columns is None else columns
+        per_row = sum(
+            FLOAT_BYTES_PER_VALUE if self._kinds[c] == "float" else STRING_BYTES_PER_VALUE for c in wanted
+        )
+        return int(per_row * self.num_rows)
+
+    def load(self, columns: Optional[Sequence[str]] = None, rows: Optional[int] = None) -> pd.DataFrame:
+        """DataFrame con le colonne richieste (tutte se None), nell'ordine richiesto.
+
+        `rows`: solo le prime N righe (anteprima), senza leggere il resto del file.
+        """
         wanted = list(self.columns if columns is None else columns)
         unknown = [c for c in wanted if c not in self._storage]
         if unknown:
@@ -97,7 +109,11 @@ class CachedDataset:
             names = [c for c in wanted if self._storage[c] == storage]
             if not names:
                 continue
-            table = pq.read_table(self.directory / filename, columns=[self._internal[c] for c in names])
+            internal = [self._internal[c] for c in names]
+            if rows is None:
+                table = pq.read_table(self.directory / filename, columns=internal)
+            else:
+                table = _read_head(self.directory / filename, internal, rows)
             for name in names:
                 column = table.column(self._internal[name])
                 if self._kinds[name] == "float":
@@ -107,7 +123,8 @@ class CachedDataset:
         df = pd.DataFrame({i: values[name] for i, name in enumerate(wanted)}, copy=False)
         df.columns = wanted
         if len(wanted) == 0:
-            df = pd.DataFrame(index=pd.RangeIndex(self.num_rows))
+            n = self.num_rows if rows is None else min(rows, self.num_rows)
+            df = pd.DataFrame(index=pd.RangeIndex(n))
         return df
 
 
@@ -164,7 +181,7 @@ def open_dataset(
         if entry.exists():
             shutil.rmtree(tmp, ignore_errors=True)
         else:
-            tmp.replace(entry)
+            _rename_with_retry(tmp, entry)
     except BaseException:
         shutil.rmtree(tmp, ignore_errors=True)
         raise
@@ -294,10 +311,10 @@ def _build_entry(
     progress_callback: Optional[ProgressCallback],
 ) -> None:
     meta = dict(meta) if meta is not None else dict(analyze_csv(str(path)))
-    if _ARROW_OK and apply_cleaning:
+    if _ARROW_OK:
         try:
             with _system_memory_pool():
-                _build_streaming(path, target, meta, decimal, thousands, progress_callback)
+                _build_streaming(path, target, meta, decimal, thousands, progress_callback, apply_cleaning)
             return
         except ingest.InvalidText:
             encoding = (meta.get("encoding") or "utf-8").lower().replace("-", "")
@@ -308,7 +325,7 @@ def _build_entry(
                 _clear_dir(target)
                 try:
                     with _system_memory_pool():
-                        _build_streaming(path, target, meta, decimal, thousands, progress_callback)
+                        _build_streaming(path, target, meta, decimal, thousands, progress_callback, apply_cleaning)
                     return
                 except (ingest.FallbackToLegacy, ingest.InvalidText):
                     pass
@@ -333,7 +350,10 @@ def _build_streaming(
     decimal: Optional[str],
     thousands: Optional[str],
     progress_callback: Optional[ProgressCallback],
+    apply_cleaning: bool = True,
 ) -> None:
+    """Conversione a blocchi. Con `apply_cleaning=False` tutte le colonne restano
+    testo originale (come il loader standard senza correzione) e serve solo il report."""
     delimiter = meta.get("delimiter") or ","
     header = meta.get("header")
     encoding = meta.get("encoding") or "utf-8"
@@ -350,27 +370,37 @@ def _build_streaming(
     main_positions: Optional[List[int]] = None
     msvc_rows: Dict[int, List[tuple]] = {}  # colonna -> [(prima riga, righe, maschera compressa)]
     writer = None
+    reader = None
     num_rows = 0
     file_size = max(1, path.stat().st_size)
     counter = ingest.InvalidRowCounter()
     workers = max(1, min(n, os.cpu_count() or 4, ingest.MAX_CONVERT_WORKERS))
 
     try:
-        reader = _open_stream(path, encoding, delimiter, header, n, counter)
+        reader = _ChunkedCsvReader(path, encoding, delimiter, header, n, counter)
         with ThreadPoolExecutor(max_workers=workers) as pool:
             for batch, suggestion in _batches_with_suggestion(reader, names, decimal, thousands):
                 casts = list(pool.map(lambda i: ingest.fast_cast(batch.column(i), suggestion), range(n)))
                 if main_positions is None:
-                    main_positions = [i for i, c in enumerate(casts) if not (c.candidate_count and c.numbers is None)]
+                    if apply_cleaning:
+                        main_positions = [
+                            i for i, c in enumerate(casts) if not (c.candidate_count and c.numbers is None)
+                        ]
+                        column_type = pa.float64()
+                    else:
+                        main_positions = list(range(n))
+                        column_type = pa.string()
                     if main_positions:
-                        schema = pa.schema([(internal[i], pa.float64()) for i in main_positions])
+                        schema = pa.schema([(internal[i], column_type) for i in main_positions])
                         writer = pq.ParquetWriter(target / MAIN_FILE, schema, compression="zstd")
                 arrays = []
                 for i in main_positions:
                     cast = casts[i]
                     if cast.candidate_count and cast.numbers is None:
                         deferred.add(i)
-                    if i in deferred or cast.numbers is None:
+                    if not apply_cleaning:
+                        arrays.append(batch.column(i))
+                    elif i in deferred or cast.numbers is None:
                         arrays.append(pa.nulls(batch.num_rows, pa.float64()))
                     else:
                         arrays.append(cast.numbers)
@@ -388,20 +418,24 @@ def _build_streaming(
                 del casts, arrays
                 pa.default_memory_pool().release_unused()
                 num_rows += batch.num_rows
-                position = getattr(reader, "bytes_read", None)
-                done = int(100 * position / file_size) if position else 0
+                done = min(100, int(100 * reader.position() / file_size))
                 ingest._progress(progress_callback, "loading", done, 100, f"{num_rows:,} righe convertite")
     except (UnicodeDecodeError, pa.ArrowInvalid) as exc:
         raise ingest.arrow_errors(exc) from exc
     finally:
         if writer is not None:
             writer.close()
+        if reader is not None:
+            reader.close()
 
     counter.check()
     if counter.too_many and counter.too_many >= ingest.MAX_SKIPPED_ROWS_RATIO * (num_rows + counter.too_many):
         raise ingest.FallbackToLegacy(f"{counter.too_many} righe con troppi campi")
     if suggestion is None:
         raise ingest.FallbackToLegacy("file senza righe di dati")
+    if not apply_cleaning:
+        _finish_raw(target, names, internal, meta, encoding, suggestion, candidates, deferred, num_rows)
+        return
 
     # Colonne da rileggere: non convertibili in modo pulito o senza alcun valore.
     reread = sorted(deferred | {i for i in range(n) if candidates[i] == 0})
@@ -478,53 +512,126 @@ def _build_streaming(
     _write_meta(target, names, internal, storage, kinds, meta, report, num_rows, engine="arrow-stream")
 
 
-class _Utf8Transcoder(io.RawIOBase):
-    """Flusso in sola lettura che converte il file in UTF-8 a pezzi.
+def _finish_raw(
+    target: Path,
+    names: List[str],
+    internal: List[str],
+    meta: Dict[str, Any],
+    encoding: str,
+    suggestion: FormatSuggestion,
+    candidates: np.ndarray,
+    deferred: Set[int],
+    num_rows: int,
+) -> None:
+    """Report della modalità senza correzione: tutte le colonne restano testo."""
+    reports: Dict[str, ColumnReport] = {}
+    raw_table = None
+    if deferred:
+        raw_table = pq.read_table(target / MAIN_FILE, columns=[internal[i] for i in sorted(deferred)])
+    for i, name in enumerate(names):
+        if candidates[i] == 0:
+            reports[name] = ingest.empty_column_report(num_rows)
+        elif i in deferred:
+            raw = raw_table.column(internal[i])
+            stripped = pc.utf8_trim_whitespace(raw)
+            series = raw.to_pandas()
+            if pc.any(pc.match_substring(stripped, "#")).as_py():
+                msvc = pc.match_substring_regex(stripped, ingest.MSVC_SPECIAL_RE)
+                series = series.where(~msvc.to_numpy(zero_copy_only=False), "nan")
+            _, column_report = clean_column(series, suggestion, apply=False)
+            column_report.dtype = "object"
+            reports[name] = column_report
+        else:
+            column_report = ingest.fast_column_report(num_rows, int(candidates[i]))
+            column_report.dtype = "object"
+            column_report.applied = False
+            reports[name] = column_report
+    report = CleaningReport(
+        suggestion=suggestion,
+        applied_cleaning=False,
+        columns=reports,
+        numeric_columns=[],
+        rows_all_nan_after_clean=[],
+        warnings=ingest.format_warnings(suggestion),
+    )
+    storage = {name: "main" for name in names}
+    kinds = {name: "string" for name in names}
+    meta = dict(meta)
+    meta["encoding"] = encoding
+    _write_meta(target, names, internal, storage, kinds, meta, report, num_rows, engine="arrow-stream-raw")
 
-    La transcodifica interna di pyarrow (ReadOptions.encoding) accumula memoria:
-    sul file reale UTF-16 da 2,9 GB il solo lettore arrivava a 1,3-1,9 GB.
-    Passando ad Arrow un flusso già UTF-8 il picco si dimezza.
+
+class _ChunkedCsvReader:
+    """Legge il CSV a blocchi di testo UTF-8 allineati a fine riga, uno alla volta.
+
+    Né `pacsv.open_csv` su un percorso con `encoding` (la transcodifica interna
+    accumulava 1,3-1,9 GB sul file reale UTF-16) né su un file Python (Arrow lo
+    legge in anticipo quasi per intero) tengono la memoria sotto controllo: qui
+    in RAM c'è sempre un solo blocco, e l'avanzamento è esatto.
+
+    Limite: un "a capo" dentro un campo tra virgolette spezzato tra due blocchi
+    produce una riga malformata, e la conversione ripiega sul percorso in memoria.
     """
 
-    def __init__(self, path: Path, encoding: str, chunk_size: int = TRANSCODE_CHUNK) -> None:
-        super().__init__()
+    def __init__(
+        self,
+        path: Path,
+        encoding: str,
+        delimiter: str,
+        header: Optional[int],
+        n_columns: int,
+        counter,
+        chunk_bytes: Optional[int] = None,
+    ) -> None:
         self._file = open(path, "rb")
-        self._decoder = codecs.getincrementaldecoder(encoding)("strict")
-        self._buffer = b""
-        self._eof = False
-        self._chunk_size = chunk_size
+        plain = ingest.is_plain_utf8(encoding)
+        self._decoder = None if plain else codecs.getincrementaldecoder(encoding)("strict")
+        self._chunk_bytes = chunk_bytes or STREAM_BLOCK_SIZE
+        self._first_options = ingest.csv_options("utf8", delimiter, header, n_columns, counter, use_threads=False)
+        self._next_options = ingest.csv_options("utf8", delimiter, None, n_columns, counter, use_threads=False)
 
-    def readable(self) -> bool:
-        return True
-
-    def readinto(self, target) -> int:
-        while len(self._buffer) < len(target) and not self._eof:
-            raw = self._file.read(self._chunk_size)
-            self._eof = not raw
-            self._buffer += self._decoder.decode(raw, final=self._eof).encode("utf-8")
-        count = min(len(target), len(self._buffer))
-        target[:count] = self._buffer[:count]
-        self._buffer = self._buffer[count:]
-        return count
+    def position(self) -> int:
+        try:
+            return self._file.tell()
+        except (OSError, ValueError):
+            return 0
 
     def close(self) -> None:
         self._file.close()
-        super().close()
+
+    def _text_blocks(self):
+        carry = b""
+        eof = False
+        while not eof:
+            raw = self._file.read(self._chunk_bytes)
+            eof = not raw
+            if self._decoder is not None:
+                raw = self._decoder.decode(raw, final=eof).encode("utf-8")
+            data = carry + raw
+            if eof:
+                carry = b""
+                if data:
+                    yield data
+                break
+            cut = data.rfind(b"\n")
+            if cut < 0:
+                carry = data
+                continue
+            carry = data[cut + 1:]
+            yield data[:cut + 1]
+
+    def __iter__(self):
+        first = True
+        for block in self._text_blocks():
+            options = self._first_options if first else self._next_options
+            first = False
+            table = pacsv.read_csv(pa.BufferReader(block), **options)
+            for batch in table.to_batches():
+                if batch.num_rows:
+                    yield batch
 
 
-def _open_stream(path: Path, encoding: str, delimiter: str, header: Optional[int], n: int, counter):
-    """Lettore Arrow in streaming a blocchi piccoli, sempre su testo UTF-8."""
-    source: Any = str(path)
-    if not ingest.is_plain_utf8(encoding):
-        source = _Utf8Transcoder(path, encoding)
-        encoding = "utf8"
-    options = ingest.csv_options(
-        encoding, delimiter, header, n, counter, block_size=STREAM_BLOCK_SIZE, use_threads=False
-    )
-    return pacsv.open_csv(source, **options)
-
-
-def _batches_with_suggestion(reader, names: List[str], decimal: Optional[str], thousands: Optional[str]):
+def _batches_with_suggestion(batches, names: List[str], decimal: Optional[str], thousands: Optional[str]):
     """Restituisce (batch, formato stimato) dopo aver letto abbastanza righe per la stima.
 
     La stima usa le prime `rows_per_column` righe come `ingest.suggest_format`:
@@ -533,11 +640,7 @@ def _batches_with_suggestion(reader, names: List[str], decimal: Optional[str], t
     rows_needed = max(10, (ingest.MAX_SAMPLE_VALUES * 4) // max(1, len(names)))
     pending: List[Any] = []
     suggestion: Optional[FormatSuggestion] = None
-    while True:
-        try:
-            batch = reader.read_next_batch()
-        except StopIteration:
-            break
+    for batch in batches:
         if suggestion is not None:
             yield batch, suggestion
             continue
@@ -582,12 +685,14 @@ def _rows_all_nan(
         if not cols:
             continue
         offset = 0
-        for batch in pq.ParquetFile(target / filename).iter_batches(columns=cols):
-            block = np.ones(batch.num_rows, dtype=bool)
-            for column in batch.columns:
-                block &= column.is_null().to_numpy(zero_copy_only=False)
-            all_nan[offset:offset + batch.num_rows] &= block
-            offset += batch.num_rows
+        # File chiuso subito: su Windows una cartella con file aperti non si rinomina.
+        with pq.ParquetFile(target / filename) as parquet:
+            for batch in parquet.iter_batches(columns=cols):
+                block = np.ones(batch.num_rows, dtype=bool)
+                for column in batch.columns:
+                    block &= column.is_null().to_numpy(zero_copy_only=False)
+                all_nan[offset:offset + batch.num_rows] &= block
+                offset += batch.num_rows
     return [int(i) + 1 for i in np.flatnonzero(all_nan & had_digit)[:50]]
 
 
@@ -717,8 +822,34 @@ def _fast_hash(path: Path, size: int) -> str:
     return digest.hexdigest()
 
 
+def _read_head(filename: Path, columns: List[str], rows: int) -> "pa.Table":
+    batches = []
+    remaining = rows
+    with pq.ParquetFile(filename) as parquet:
+        for batch in parquet.iter_batches(batch_size=max(1, rows), columns=columns):
+            batches.append(batch.slice(0, remaining))
+            remaining -= min(remaining, batch.num_rows)
+            if remaining <= 0:
+                break
+    if not batches:
+        return pq.read_table(filename, columns=columns).slice(0, 0)
+    return pa.Table.from_batches(batches)
+
+
 def _combine(array: Any) -> Any:
     return array.combine_chunks() if isinstance(array, pa.ChunkedArray) else array
+
+
+def _rename_with_retry(source: Path, target: Path, attempts: int = 5) -> None:
+    """Rinomina la cartella temporanea; su Windows un antivirus può bloccarla per un attimo."""
+    for attempt in range(attempts):
+        try:
+            source.replace(target)
+            return
+        except PermissionError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(0.2 * (attempt + 1))
 
 
 def _touch(entry: Path) -> None:

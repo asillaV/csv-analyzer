@@ -121,6 +121,28 @@ Limiti noti:
 - Selezione con finestra di dialogo nativa (tkinter lanciato lato server) e lista dei file recenti.
 - `st.file_uploader` resta per la modalità web e per i file piccoli.
 
+### Esito F3
+
+- `core/local_files.py`: modalità desktop (`ANALIZZATORE_DESKTOP=1`, impostato da `run_app.py`, o bundle PyInstaller); finestra nativa "Apri file" di Windows via `ctypes` (`GetOpenFileNameW` in un thread con COM, senza tkinter); file recenti in `user_data_dir()/recent_files.json`; percorsi incollati anche tra virgolette.
+- App, sezione "Oppure apri un file dal PC": "Sfoglia...", percorso incollato, file recenti, "Chiudi file". Il file non passa dal browser: niente copia in RAM, hash completo o file temporaneo. Il limite di dimensione file non si applica ai file locali (restano righe/colonne).
+- Caricamento per colonne: se il DataFrame completo supera il 30% della RAM disponibile, l'app tiene aperta la voce di cache e carica solo X e Y scelte dopo "Applica / Plot" (anteprima dalle prime righe, controlli qualità sulle colonne scelte). I file piccoli si comportano come prima.
+- Upload e sample passano anch'essi dalla cache su disco (loader ottimizzato attivo, default); il vecchio percorso resta se il loader ottimizzato è disattivato.
+- Cache anche **senza** "Applica correzione" (il default dell'app): colonne salvate come testo originale, report come il loader standard. Prima di F3 questo caso usava ancora il vecchio loader in memoria.
+- Lettore a blocchi proprio (`_ChunkedCsvReader`): testo UTF-8 allineato a fine riga, un blocco alla volta. `pacsv.open_csv` su file Python leggeva in anticipo quasi tutto il file. Avanzamento esatto con barra nell'app; il timeout si controlla tra un blocco e l'altro.
+- Corretto su Windows: la cartella della cache non si rinominava se un file Parquet restava aperto ("Accesso negato"); ora i file vengono chiusi e la rinomina riprova per qualche istante (antivirus).
+
+Prova nell'app (browser integrato) con il file reale da 2,9 GB aperto da percorso:
+
+| Passo | Risultato |
+|---|---|
+| Conversione senza correzione | ~40 s con barra di avanzamento; modalità per colonne (~25 GB se caricato tutto come testo) |
+| Conversione con correzione | ~35 s; modalità per colonne (~3,8 GB stimati) |
+| Riapertura | immediata (cache) |
+| Grafico di 1 colonna | 188 MB in RAM (testo) |
+| Grafico X + 2 Y | 89 MB in RAM (numeri) |
+
+Benchmark della conversione dopo il lettore a blocchi: file 2,9 GB in 35 s con picco **406 MB** (prima 813 MB); `ipraw25k` 674 MB, `iptpa` 776 MB 917 MB (picco dovuto alle colonne irregolari rilette per intero).
+
 ### F4 — Semplificazione dell'esecuzione
 - Con il percorso veloce il parsing gira nel thread corrente: il ramo subprocess + pickle viene rimosso per i percorsi locali.
 - `parse_timeout_s` diventa un limite controllato tra le fasi (la lettura arrow non è interrompibile a metà).

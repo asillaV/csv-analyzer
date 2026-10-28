@@ -237,3 +237,124 @@ def test_progress_callback(tmp_path):
     phases = []
     dataset_cache.open_dataset(_csv(tmp_path), directory=tmp_path / "cache", progress_callback=lambda p: phases.append(p.phase))
     assert "loading" in phases
+
+
+# ---------------------------------------------------------------------------
+# F3: modalità senza correzione, anteprima, stima memoria, rinomina
+# ---------------------------------------------------------------------------
+RAW_REFERENCE_BUGS = {"cp1252_accents", "no_header"}  # vedi test_ingest_parity.KNOWN_REFERENCE_BUGS
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("name", [n for n in CORPUS if n not in RAW_REFERENCE_BUGS])
+def test_raw_mode_matches_standard_loader(corpus_paths, tmp_path, monkeypatch, name):
+    """Senza correzione: stesso testo originale e nessuna colonna numerica, come il loader standard."""
+    monkeypatch.setattr(dataset_cache, "STREAM_BLOCK_SIZE", 4096)
+    path = corpus_paths[name]
+    expected = ingest.load(path, apply_cleaning=False)
+    dataset = dataset_cache.open_dataset(path, apply_cleaning=False, directory=tmp_path / "cache")
+    diffs = compare_outcomes(
+        LoadOutcome(df=expected.df, report=expected.report),
+        LoadOutcome(df=dataset.load(), report=dataset.report),
+    )
+    assert not diffs, f"{name}: " + "; ".join(diffs)
+    assert dataset.report.numeric_columns == []
+    assert dataset.report.applied_cleaning is False
+
+
+def test_raw_mode_fixes_reference_bugs(corpus_paths, tmp_path):
+    cp = dataset_cache.open_dataset(corpus_paths["cp1252_accents"], apply_cleaning=False, directory=tmp_path / "a")
+    assert cp.columns == ["misura", "pressione àèé"] and cp.num_rows == 60
+    assert cp.load(["pressione àèé"]).iloc[0, 0].count(",") == 1
+    nh = dataset_cache.open_dataset(corpus_paths["no_header"], apply_cleaning=False, directory=tmp_path / "b")
+    assert nh.num_rows == 100
+    assert nh.load(rows=1).iloc[0, 0] == "0.00"
+
+
+def test_raw_mode_column_report(tmp_path):
+    rows = [f'{i};"€ 1.234,{i:02d}";{i * 0.5}' for i in range(30)]
+    path = tmp_path / "raw.csv"
+    path.write_text("n;prezzo;v\n" + "\n".join(rows) + "\n", encoding="utf-8")
+    dataset = dataset_cache.open_dataset(path, apply_cleaning=False, directory=tmp_path / "cache")
+    report = dataset.report.columns
+    assert report["prezzo"].candidate_numeric == 30 and report["prezzo"].applied is False
+    assert report["v"].converted == 30 and report["v"].dtype == "object"
+    assert dataset.load(["prezzo"])["prezzo"].iloc[3] == "€ 1.234,03"
+
+
+def test_head_rows_preview(tmp_path):
+    dataset = dataset_cache.open_dataset(_csv(tmp_path, rows=500), directory=tmp_path / "cache")
+    head = dataset.load(rows=7)
+    assert len(head) == 7
+    pd.testing.assert_frame_equal(head, dataset.load().head(7))
+    assert len(dataset.load([], rows=3)) == 3
+    assert len(dataset.load(rows=10_000)) == 500
+
+
+def test_head_rows_with_extra_columns(tmp_path, monkeypatch):
+    monkeypatch.setattr(dataset_cache, "STREAM_BLOCK_SIZE", 1024)
+    rows = [f"Linea {i % 3};{i}" for i in range(200)]
+    path = tmp_path / "mixed.csv"
+    path.write_text("Line;n\n" + "\n".join(rows) + "\n", encoding="utf-8")
+    dataset = dataset_cache.open_dataset(path, directory=tmp_path / "cache")
+    pd.testing.assert_frame_equal(dataset.load(rows=5), dataset.load().head(5))
+
+
+def test_estimated_memory(tmp_path):
+    path = tmp_path / "est.csv"
+    words = ["alfa", "beta", "gamma"]
+    path.write_text("txt,a\n" + "\n".join(f"{words[i % 3]},{i}" for i in range(100)) + "\n", encoding="utf-8")
+    dataset = dataset_cache.open_dataset(path, directory=tmp_path / "cache")
+    float_only = dataset.estimated_memory_bytes(["a"])
+    assert float_only == 100 * dataset_cache.FLOAT_BYTES_PER_VALUE
+    assert dataset.estimated_memory_bytes() == float_only + 100 * dataset_cache.STRING_BYTES_PER_VALUE
+
+
+def test_rename_retries_on_permission_error(tmp_path, monkeypatch):
+    source = tmp_path / "a"
+    source.mkdir()
+    target = tmp_path / "b"
+    calls = []
+    original = Path.replace
+
+    def flaky(self, other):
+        calls.append(1)
+        if len(calls) < 3:
+            raise PermissionError("bloccato")
+        return original(self, other)
+
+    monkeypatch.setattr(Path, "replace", flaky)
+    monkeypatch.setattr(dataset_cache.time, "sleep", lambda _s: None)
+    dataset_cache._rename_with_retry(source, target)
+    assert target.exists() and len(calls) == 3
+
+    def always_locked(self, other):
+        raise PermissionError("sempre")
+
+    other = tmp_path / "c"
+    other.mkdir()
+    monkeypatch.setattr(Path, "replace", always_locked)
+    with pytest.raises(PermissionError):
+        dataset_cache._rename_with_retry(other, tmp_path / "d", attempts=2)
+
+
+def test_msvc_rows_all_nan_entry_is_renamed(tmp_path):
+    """Regressione Windows: i Parquet letti per rows_all_nan vanno chiusi prima di rinominare."""
+    rows = [f"{i},1.#IO,1.#QO" if i % 5 == 0 else f"{i},{i * 0.5},{i * 0.25}" for i in range(100)]
+    path = tmp_path / "msvc.csv"
+    path.write_text("n,a,b\n" + "\n".join(rows) + "\n", encoding="utf-8")
+    dataset = _assert_same_as_ingest(path, tmp_path / "cache")
+    assert dataset.directory.exists()
+    assert not [p for p in (tmp_path / "cache").iterdir() if ".tmp-" in p.name]
+
+
+def test_progress_reaches_end(tmp_path, monkeypatch):
+    monkeypatch.setattr(dataset_cache, "STREAM_BLOCK_SIZE", 512)
+    seen = []
+    dataset_cache.open_dataset(
+        _csv(tmp_path, rows=400),
+        directory=tmp_path / "cache",
+        progress_callback=lambda p: seen.append(p.current) if p.phase == "loading" else None,
+    )
+    assert len(seen) > 3
+    assert seen == sorted(seen) and seen[-1] == 100

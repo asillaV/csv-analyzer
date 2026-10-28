@@ -427,3 +427,64 @@ def test_cache_store_immutability(mock_streamlit):
     assert mock_streamlit["_cached_df"].loc[0, "x"] == 10, \
         "Cache deve essere isolata dal df originale"
     assert df.loc[0, "x"] == 777, "df originale deve essere mutato"
+
+
+# ---------------------------------------------------------------------------
+# Parte 1 F3: file aperti dal disco e caricamento per colonne
+# ---------------------------------------------------------------------------
+def test_needed_columns_x_and_y_without_duplicates():
+    available = ["t", "a", "b", "c"]
+    assert web_app._needed_columns("t", ["a", "b"], available) == ["t", "a", "b"]
+    assert web_app._needed_columns("—", ["a"], available) == ["a"]
+    assert web_app._needed_columns(None, ["a", "a", "b"], available) == ["a", "b"]
+    assert web_app._needed_columns("a", ["a", "c"], available) == ["a", "c"]
+    assert web_app._needed_columns("manca", ["b"], available) == ["b"]
+
+
+def test_check_shape_limits():
+    limits = {"max_rows": 100, "max_cols": 5}
+    assert web_app._check_shape_limits(100, 5, limits) is None
+    assert "righe" in web_app._check_shape_limits(101, 5, limits)
+    assert "colonne" in web_app._check_shape_limits(10, 6, limits)
+
+
+def test_should_load_lazily_uses_ram_threshold(tmp_path, monkeypatch):
+    from core import dataset_cache
+
+    path = tmp_path / "d.csv"
+    path.write_text("a,b\n" + "\n".join(f"{i},{i}" for i in range(1000)) + "\n", encoding="utf-8")
+    dataset = dataset_cache.open_dataset(path, directory=tmp_path / "cache")
+    size = dataset.estimated_memory_bytes()
+    monkeypatch.setattr(web_app, "_lazy_threshold_bytes", lambda: size - 1)
+    assert web_app._should_load_lazily(dataset)
+    monkeypatch.setattr(web_app, "_lazy_threshold_bytes", lambda: size)
+    assert not web_app._should_load_lazily(dataset)
+
+
+def test_lazy_threshold_is_fraction_of_available_ram(monkeypatch):
+    import psutil
+
+    monkeypatch.setattr(psutil, "virtual_memory", lambda: SimpleNamespace(available=10 * 1024**3))
+    assert web_app._lazy_threshold_bytes() == int(10 * 1024**3 * web_app.LAZY_RAM_FRACTION)
+
+
+def test_load_dataset_columns_cached_in_session(tmp_path, mock_streamlit):
+    from core import dataset_cache
+
+    path = tmp_path / "d.csv"
+    path.write_text("t,a,b\n" + "\n".join(f"{i},{i * 2},{i * 3}" for i in range(50)) + "\n", encoding="utf-8")
+    dataset = dataset_cache.open_dataset(path, directory=tmp_path / "cache")
+    with patch.object(dataset, "load", wraps=dataset.load) as spy:
+        first = web_app._load_dataset_columns(dataset, ["t", "b"])
+        first.loc[0, "b"] = -1  # la copia restituita non deve alterare la cache
+        second = web_app._load_dataset_columns(dataset, ["t", "b"])
+        assert spy.call_count == 1
+        assert list(second.columns) == ["t", "b"] and second.loc[0, "b"] == 0
+        web_app._load_dataset_columns(dataset, ["a"])
+        assert spy.call_count == 2
+
+
+def test_path_file_signature_uses_cache_entry(tmp_path, mock_streamlit):
+    entry = SimpleNamespace(directory=tmp_path / "0123456789abcdef0123")
+    sig = web_app._path_file_signature(entry, 1234)
+    assert sig[1:] == (1234, "0123456789abcdef")
