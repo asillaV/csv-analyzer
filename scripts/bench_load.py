@@ -138,10 +138,10 @@ def _run_isolated(loader: str, path: Path) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 def _compare(path: Path) -> List[str]:
     logging.disable(logging.CRITICAL)
-    from tests.parity import LoadOutcome, compare_outcomes, load_reference
+    from tests.parity import LoadOutcome, apply_msvc_rule, compare_outcomes, load_reference
     from core import ingest
 
-    ref = load_reference(path)
+    ref = apply_msvc_rule(load_reference(path), path)
     try:
         r = ingest.load(path)
         new = LoadOutcome(df=r.df, report=r.report, meta=dict(r.meta))

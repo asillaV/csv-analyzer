@@ -74,6 +74,8 @@ Ogni fase si chiude con test verdi (`pytest`, soglia 80%), `ruff check core/ tes
 
 - `core/ingest.py` implementato e collegato in `loader_optimized.load_csv` (parametro `use_fast_ingest=False` per tornare al vecchio percorso). `csv_cleaner.clean_column` estratto da `clean_dataframe` senza cambiarne il comportamento, riusato per le colonne che Arrow non converte in modo pulito.
 - Parità: tutto il corpus e i 14 CSV locali di `tests_csv/` identici al loader standard, salvo i difetti noti voluti (cp1252, senza intestazione, token MSVC). Sulla fetta reale le sole differenze sono `Pressure [bar]` e `Pressure_R [bar]`, colonne fatte quasi solo di `1.#IO` che il vecchio loader trasformava in un finto `1.0`.
+- Altri CSV reali (survey `E:\Dati P723\PIMSA\Surveys\20250921\20250921_024035`: `ipraw25k`, `ipbase`, `iptpa`; UTF-16, `sep=,`, colonna di testo `Line`, fino a 307 colonne): fette da 40 MB copiate in `tests_csv/real_20250921_*_40mb.csv` ed entrate nei test di parità locali. Risultato identico al loader standard; tempi 6,3–7,2 s → 0,97–1,15 s, picco RAM −40%.
+- La regola "token MSVC = NA" è codificata nell'oracolo (`tests/parity.apply_msvc_rule`): le celle del riferimento con un token MSVC nel CSV originale diventano NA prima del confronto, il resto deve essere identico.
 - Trovato e aggirato un difetto di pyarrow 21: `fill_null(...).to_numpy()` restituisce valori errati (test di regressione in `tests/test_ingest.py`).
 
 | File | Prima | Dopo F1 | Picco RAM prima → dopo |

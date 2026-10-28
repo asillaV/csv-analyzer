@@ -21,7 +21,7 @@ import pandas as pd
 import pytest
 
 from tests.fixtures.csv_corpus import CORPUS, write_corpus
-from tests.parity import LoadOutcome, assert_load_equivalent, load_reference
+from tests.parity import LoadOutcome, apply_msvc_rule, assert_load_equivalent, load_reference
 
 pytestmark = pytest.mark.integration
 
@@ -32,13 +32,6 @@ needs_ingest = pytest.mark.skipif(not INGEST_AVAILABLE, reason="core.ingest non 
 KNOWN_REFERENCE_BUGS: Dict[str, str] = {
     "cp1252_accents": "UnicodeDecodeError: i file non UTF non vengono aperti",
     "no_header": "la prima riga di dati viene usata come intestazione (riga persa)",
-}
-
-# Singole colonne in cui il riferimento sbaglia: escluse dal confronto dei valori.
-# Il loader storico toglie i caratteri non numerici da "1.#IO"/"-1.#R" e, se i
-# token superano ~5% della colonna, li trasforma in ±1.0; il nuovo dà sempre NA.
-KNOWN_REFERENCE_BUG_COLUMNS: Dict[str, set] = {
-    "utf16le_excel_like": {"Offset [V]"},
 }
 
 PARITY_CASES = [name for name in CORPUS if name not in KNOWN_REFERENCE_BUGS]
@@ -81,9 +74,7 @@ def test_reference_loads_corpus(corpus_paths, name):
 @pytest.mark.parametrize("name", PARITY_CASES)
 def test_ingest_parity(corpus_paths, name):
     path = corpus_paths[name]
-    assert_load_equivalent(
-        load_reference(path), _load_new(path), KNOWN_REFERENCE_BUG_COLUMNS.get(name, ())
-    )
+    assert_load_equivalent(apply_msvc_rule(load_reference(path), path), _load_new(path))
 
 
 @needs_ingest
@@ -128,7 +119,7 @@ def _local_csvs() -> list[Path]:
 @pytest.mark.slow
 @pytest.mark.parametrize("path", _local_csvs(), ids=lambda p: p.name)
 def test_ingest_parity_local_files(path):
-    assert_load_equivalent(load_reference(path), _load_new(path))
+    assert_load_equivalent(apply_msvc_rule(load_reference(path), path), _load_new(path))
 
 
 def test_corpus_is_deterministic(tmp_path):

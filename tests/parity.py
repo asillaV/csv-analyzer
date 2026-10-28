@@ -56,6 +56,40 @@ def load_reference(path: Path, apply_cleaning: bool = True) -> LoadOutcome:
         return LoadOutcome(error=exc)
 
 
+MSVC_SPECIAL_RE = r"^\s*[+-]?\d+\.#"
+
+
+def apply_msvc_rule(ref: LoadOutcome, path: Path) -> LoadOutcome:
+    """Applica al riferimento la regola voluta "token MSVC = NA".
+
+    Il loader storico toglie i caratteri non numerici da "1.#IO"/"-1.#R" e, se i
+    token superano ~5% della colonna, li trasforma in ±1.0. Qui quelle celle del
+    riferimento diventano NA, così il confronto resta esatto su tutto il resto.
+    """
+    if ref.error is not None or ref.df is None or ref.report is None or ref.meta is None:
+        return ref
+    raw = pd.read_csv(
+        path,
+        sep=ref.meta.get("delimiter") or ",",
+        encoding=ref.meta.get("encoding") or "utf-8",
+        header=ref.meta.get("header") if ref.meta.get("header") is not None else "infer",
+        dtype=str,
+        keep_default_na=False,
+        na_filter=False,
+        on_bad_lines="skip",
+    )
+    df = ref.df.copy()
+    for position, name in enumerate(df.columns):
+        if name not in ref.report.numeric_columns:
+            continue
+        tokens = raw.iloc[:, position].astype("string").str.match(MSVC_SPECIAL_RE, na=False).to_numpy()
+        if tokens.any():
+            column = df.iloc[:, position].copy()
+            column[tokens] = pd.NA
+            df.iloc[:, position] = column
+    return LoadOutcome(df=df, report=ref.report, meta=ref.meta)
+
+
 def load_reference_chunked(path: Path, chunk_size: int = 1000) -> LoadOutcome:
     """Ramo chunked del loader attuale (usato oggi oltre le soglie di dimensione)."""
     from core.analyzer import analyze_csv
