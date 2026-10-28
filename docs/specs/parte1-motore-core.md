@@ -122,9 +122,36 @@ Ogni fase si chiude con test verdi (`pytest`, soglia 80%), `ruff check core/ tes
 - **Righe malformate**: oggi `on_bad_lines="skip"`; con arrow serve `invalid_row_handler` equivalente.
 - **PyInstaller**: i nuovi moduli `core/*` devono comparire nel bundle (`collect_submodules("core")` li copre; verificare con una build).
 
-## Decisioni aperte (da confermare con l'utente)
+## Decisioni (confermate il 28/10/2026)
 
-1. Il file `tests_csv/20251126_100925_iptpa.csv` è rappresentativo dei file reali, o serve un altro CSV di benchmark?
-2. I token MSVC (`1.#IO` = infinito, `1.#QO` = NaN…) vanno trattati tutti come `NA` (come oggi) o va distinto `±inf`?
-3. Nella versione desktop si può togliere del tutto il ramo subprocess (e il relativo timeout "duro"), o va tenuto per sicurezza?
-4. Limite predefinito della cache su disco: 5 GB va bene?
+1. Il file `tests_csv/20251126_100925_iptpa.csv` è rappresentativo; in più il loader deve aprire **la grande maggioranza dei formati CSV**, non solo quello. Per questo la parità si verifica su un corpus generato di formati diversi (`tests/fixtures/csv_corpus.py`), che gira anche in CI.
+2. I token MSVC restano `NA`, come oggi.
+3. Nella versione desktop il ramo subprocess si elimina.
+4. Limite predefinito della cache su disco: 5 GB.
+
+## Esito F0 (banco di prova)
+
+- `tests/fixtures/csv_corpus.py`: 23 formati generati (UTF-8/BOM/UTF-16 LE e BE/cp1252, separatori `,` `;` tab `|`, decimale `,` e `.`, migliaia con `.` `,` apostrofo e spazio, `sep=;`, nomi duplicati, token MSVC, valute e percentuali, segni e parentesi, date, senza intestazione, campi quotati, separatore finale, righe malformate, colonne vuote, file larghi e lunghi).
+- `tests/parity.py`: oracolo `load_reference()` (percorso di produzione attuale) e confronto `compare_outcomes()` secondo il contratto sopra.
+- `tests/test_ingest_parity.py`: parità su tutto il corpus e sui CSV locali di `tests_csv/` (≤ 50 MB, marcati `slow`); saltati finché `core.ingest` non esiste.
+- `scripts/bench_load.py`: tempi, picco RAM e memoria del DataFrame per ogni loader in processi separati, `--slice-mb` per le fette dei file grandi, `--compare` per le differenze.
+
+Interfaccia attesa da F1: `core.ingest.load(path, *, apply_cleaning=True, decimal=None, thousands=None, progress_callback=None)` che restituisce un oggetto con `df`, `report` (`CleaningReport`), `meta` (dict come `analyze_csv`) e `timings` (dict fase → secondi).
+
+Difetti del loader attuale trovati dal corpus (il nuovo **non** deve replicarli):
+
+| Caso | Oggi | Atteso dal nuovo |
+|---|---|---|
+| CSV Windows cp1252 con accenti nell'intestazione | crash `UnicodeDecodeError` | caricato, intestazione corretta |
+| CSV senza intestazione | la prima riga di dati diventa intestazione (riga persa) | tutte le righe, nomi `Column_N` come `analyze_csv` |
+| Ramo chunked (oltre le soglie) | colonne di metadati del file reale lette come testo; righe malformate gestite diversamente dal ramo standard | stesso comportamento del ramo standard |
+
+Per questo la parità si misura sempre contro il ramo **standard** del loader attuale.
+
+Misure di riferimento con `scripts/bench_load.py` (processo isolato):
+
+| File | Tempo | Picco RAM |
+|---|---|---|
+| `bench_medium_50k.csv` (11 MB) | 1,9 s | 222 MB |
+| `bench_large_500k.csv` (170 MB) | 22,3 s | 1,7 GB |
+| Fetta reale 300 MB | 40,4 s | 2,0 GB |
