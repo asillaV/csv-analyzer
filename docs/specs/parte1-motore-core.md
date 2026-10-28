@@ -156,6 +156,49 @@ Benchmark della conversione dopo il lettore a blocchi: file 2,9 GB in 35 s con p
 - `web_app.py` la adotta per gradi: prima caricamento e cache, poi le funzioni di analisi. Nessuna modifica visibile all'utente.
 - Test unitari dedicati, con copertura ≥ 90% sul nuovo modulo.
 
+Dettaglio dell'interfaccia (definito all'avvio di F5):
+
+```python
+# Funzioni pure (spostate da web_app.py)
+parse_x(raw: pd.Series) -> Optional[pd.Series]        # numerico se >=80% valido, altrimenti datetime
+numeric_series(df, column) -> pd.Series                # pd.to_numeric(errors="coerce"), nome conservato
+
+# Cache dei risultati (oggi in st.session_state): stesse chiavi e dimensioni LRU
+class ResultCache:                                     # filter 32, fft 16, transform 32, quality 4
+    transform(series, x, specs, fs_info, signature, column, fill_stamp) -> (y, x, descrizioni, cambia_lunghezza)
+    filter(series, x, fspec, fs, fs_source, signature, column, fill_stamp) -> Optional[pd.Series]
+    fft(series, fs, fs_source, fftspec, signature, column, is_filtered, fill_stamp, fspec) -> (freqs, amp)
+    quality(df, signature, config) -> DataQualityReport
+    stats -> {"filter_hits", "filter_misses", "fft_hits", "fft_misses"}; clear()
+
+# Configurazione serializzabile (compatibile con i campi dei preset: manual_fs, filter, fft)
+@dataclass class Recipe:
+    x, manual_fs, fill_missing, interpolate_x,
+    transforms: List[RecipeTransform(spec: TransformSpec, targets: List[str])],
+    filter: FilterSpec, fft: FFTSpec, fft_use_filtered
+    to_dict() / from_dict() / to_json() / from_json()   # "recipe_version": "1"
+
+class AnalysisSession:
+    AnalysisSession(source: pd.DataFrame | CachedDataset, recipe=None, signature=None)
+    AnalysisSession.open(path, apply_cleaning=True, cache_dir=None)   # via dataset_cache
+    columns, numeric_columns, num_rows, report, meta, recipe, cache
+    frame(columns) -> DataFrame          # carica dalla cache Parquet solo le colonne richieste
+    x_values() / fs_info()               # X con riempimento/interpolazione; resolve_fs una volta
+    series(col) -> (y, x)                # dopo le trasformazioni che si applicano alla colonna
+    filtered(col) -> FilterResult(series, applied, message)
+    fft(col) -> FFTResult(freqs, amp, used_filtered, message)
+    quality(columns=None) -> DataQualityReport
+    stats(columns=None) -> DataFrame     # count/mean/std/min/max/rms per colonna elaborata
+    to_recipe() / from_recipe()
+```
+
+Esito F5:
+- `core/engine.py` implementato come sopra; copertura 98,7% (`tests/test_engine.py`, 25 test). Il test chiave verifica che `series`/`filtered`/`fft` diano esattamente lo stesso risultato delle chiamate dirette a `apply_transform_pipeline`, `apply_filter` e `compute_fft` usate dall'app.
+- `AnalysisSession.open(path)` su cache Parquet carica solo X e le colonne richieste (verificato nei test).
+- `web_app.py`: cache di filtro, FFT, trasformazioni e qualità sostituite da un'unica `ResultCache` per sessione (`st.session_state["_result_cache"]`); parsing di X/Y dal motore; le statistiche hit/miss nel log ora sono per sessione invece che globali al processo. Rimossa la doppia definizione di `_ensure_session_id`/`_build_file_signature`. Verificato nel browser con il sample: fs 100 Hz, filtro, FFT e qualità invariati.
+
+Adozione in `web_app.py` in questa fase: le funzioni con cache (`_apply_filter_cached`, `_apply_transform_pipeline_cached`, `_compute_fft_cached`, controlli qualità, parsing della X) diventano involucri attorno a `ResultCache` e alle funzioni del motore; le tre modalità di grafico non cambiano. La riscrittura dei grafici sopra `AnalysisSession` è il passo successivo.
+
 ## Obiettivi misurabili (criteri di accettazione)
 
 | Misura | Oggi | Obiettivo |

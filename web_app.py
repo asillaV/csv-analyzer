@@ -27,6 +27,7 @@ from core.analyzer import analyze_csv
 from core.csv_cleaner import CleaningReport
 from core import dataset_cache
 from core.csv_parser_worker import _parsing_worker
+from core.engine import ResultCache, numeric_series, parse_x, to_datetime_flexible
 from core.paths import resource_path
 from core import local_files
 from core import settings as app_settings
@@ -53,18 +54,14 @@ from core.signal_tools import (
     FFTSpec,
     resolve_fs,
     validate_filter_spec,
-    apply_filter,
-    compute_fft,
 )
 from core.signal_transforms import (
     TransformSpec,
     TRANSFORM_LABELS,
     TRANSFORM_GUIDE,
-    apply_transform_pipeline,
     validate_transform_spec,
-    transform_spec_cache_key,
 )
-from core.quality import run_quality_checks, DataQualityReport
+from core.quality import DataQualityReport
 from core.preset_manager import (
     save_preset,
     load_preset,
@@ -251,33 +248,10 @@ def _render_local_file_picker() -> None:
 
 def _run_and_render_quality(df: pd.DataFrame, file_sig: FileSignature) -> None:
     """Controlli qualità (con cache) sulle colonne di `df` e badge con i dettagli."""
-    _init_result_caches()
     quality_config = _load_quality_config()
     try:
-        all_cols = list(df.columns)
-        _quality_key = (
-            file_sig,
-            tuple(all_cols),
-            (quality_config['gap_factor_k'], quality_config['spike_z'], quality_config['min_points']),
-        )
-        quality_report = st.session_state["_quality_cache"].get(_quality_key)
-        if quality_report is None:
-            quality_report = run_quality_checks(
-                df=df,
-                x_col=None,
-                y_cols=all_cols,
-                gap_factor_k=quality_config['gap_factor_k'],
-                spike_z=quality_config['spike_z'],
-                min_points=quality_config['min_points'],
-                max_examples=quality_config['max_examples']
-            )
-            _qcache = st.session_state["_quality_cache"]
-            if len(_qcache) >= MAX_QUALITY_CACHE_SIZE:
-                _qcache.pop(next(iter(_qcache)))
-            _qcache[_quality_key] = quality_report
-            quality_logger = LogManager(component="quality").get_logger()
-            quality_logger.info(quality_report.get_summary())
-
+        quality_report = _result_cache().quality(df, file_sig, quality_config)
+        LogManager(component="quality").get_logger().info(quality_report.get_summary())
         _render_quality_badge_and_details(quality_report)
     except Exception as e:
         st.warning(f"Impossibile eseguire controlli qualità: {e}")
@@ -471,37 +445,6 @@ def _parse_csv_with_timeout(file_bytes: bytes, apply_cleaning: bool, timeout_s: 
             pass
 SAMPLE_CSV_PATH = resource_path("assets/sample_timeseries.csv")
 
-# Cache limits
-MAX_FILTER_CACHE_SIZE = 32
-MAX_FFT_CACHE_SIZE = 16
-MAX_QUALITY_CACHE_SIZE = 4
-
-# FIX ISSUE #55: Cache telemetry per monitoraggio hit/miss rate
-CACHE_STATS = {
-    "filter_hits": 0,
-    "filter_misses": 0,
-    "fft_hits": 0,
-    "fft_misses": 0,
-}
-
-
-# ---------------------- Session helpers (Issue #49) ---------------------- #
-def _ensure_session_id() -> str:
-    """Return the per-session identifier, initializing it on first access."""
-    key = "dataset_id"
-    if key not in st.session_state:
-        st.session_state[key] = uuid.uuid4().hex
-    return st.session_state[key]
-
-
-def _build_file_signature(file_bytes: bytes) -> FileSignature:
-    """Create a file signature bound to the current session."""
-    session_id = _ensure_session_id()
-    size = len(file_bytes)
-    digest = hashlib.sha1(file_bytes).hexdigest()[:16]
-    return (session_id, size, digest)
-
-
 # ---------------------- Session helpers (Issue #49) ---------------------- #
 def _ensure_session_id() -> str:
     """Return the per-session identifier, initializing it on first access."""
@@ -520,99 +463,22 @@ def _build_file_signature(file_bytes: bytes) -> FileSignature:
 
 
 # ---------------------- Cache helpers (Issue #35) ---------------------- #
+# Le cache di trasformazioni, filtri, FFT e qualità vivono in core.engine.ResultCache
+# (stesse chiavi e dimensioni LRU di prima); qui ne resta una per sessione.
 def _init_result_caches() -> None:
-    """Initialize cache dictionaries in session state if not present."""
-    if "_filter_cache" not in st.session_state:
-        st.session_state["_filter_cache"] = {}
-    if "_fft_cache" not in st.session_state:
-        st.session_state["_fft_cache"] = {}
-    if "_quality_cache" not in st.session_state:
-        st.session_state["_quality_cache"] = {}
-    if "_transform_cache" not in st.session_state:
-        st.session_state["_transform_cache"] = {}
+    """Initialize the per-session result cache if not present."""
+    if not isinstance(st.session_state.get("_result_cache"), ResultCache):
+        st.session_state["_result_cache"] = ResultCache()
 
 
-def _get_filter_cache_key(
-    column: str,
-    file_sig: FileSignature,
-    fspec: FilterSpec,
-    fs: Optional[float],
-    fs_source: Optional[str],
-    fill_stamp: bool,
-) -> Tuple:
-    """Generate hashable cache key for filter results."""
-    from dataclasses import astuple
-    # Include fs, fs_source e stato del fill per invalidare correttamente
-    return (column, file_sig, astuple(fspec), fs, fs_source, fill_stamp)
-
-
-def _get_fft_cache_key(
-    column: str,
-    file_sig: FileSignature,
-    is_filtered: bool,
-    fftspec: FFTSpec,
-    fs: float,
-    fs_source: Optional[str],
-    fill_stamp: bool,
-    filter_sig: Optional[Tuple] = None,
-) -> Tuple:
-    """Generate hashable cache key for FFT results."""
-    from dataclasses import astuple
-    # Include fs_source e stato del fill per invalidare quando cambiano questi parametri.
-    # Include filter_sig (astuple(fspec)) quando is_filtered: lo spettro del segnale
-    # filtrato dipende dal filtro applicato, quindi deve invalidarsi al cambio filtro
-    # (es. MA finestra 10 -> 1). Per l'originale resta None (non dipende dal filtro).
-    return (column, file_sig, is_filtered, astuple(fftspec), fs, fs_source, fill_stamp, filter_sig)
-
-
-def _get_cached_filter(key: Tuple) -> Optional[pd.Series]:
-    """Retrieve cached filter result with telemetry."""
-    result = st.session_state.get("_filter_cache", {}).get(key)
-    # FIX ISSUE #55: Track cache hit/miss
-    if result is not None:
-        CACHE_STATS["filter_hits"] += 1
-    else:
-        CACHE_STATS["filter_misses"] += 1
-    return result
-
-
-def _cache_filter_result(key: Tuple, result: pd.Series) -> None:
-    """Store filter result with LRU eviction."""
-    cache = st.session_state.setdefault("_filter_cache", {})
-    if len(cache) >= MAX_FILTER_CACHE_SIZE:
-        # Simple LRU: remove oldest (first) entry
-        oldest_key = next(iter(cache))
-        cache.pop(oldest_key)
-    cache[key] = result.copy()  # Store copy to avoid reference issues
-
-
-def _get_cached_fft(key: Tuple) -> Optional[Tuple[np.ndarray, np.ndarray]]:
-    """Retrieve cached FFT result with telemetry."""
-    result = st.session_state.get("_fft_cache", {}).get(key)
-    # FIX ISSUE #55: Track cache hit/miss
-    if result is not None:
-        CACHE_STATS["fft_hits"] += 1
-    else:
-        CACHE_STATS["fft_misses"] += 1
-    return result
-
-
-def _cache_fft_result(key: Tuple, freqs: np.ndarray, amp: np.ndarray) -> None:
-    """Store FFT result with LRU eviction."""
-    cache = st.session_state.setdefault("_fft_cache", {})
-    if len(cache) >= MAX_FFT_CACHE_SIZE:
-        # Simple LRU: remove oldest (first) entry
-        oldest_key = next(iter(cache))
-        cache.pop(oldest_key)
-    cache[key] = (freqs.copy(), amp.copy())  # Store copies
+def _result_cache() -> ResultCache:
+    _init_result_caches()
+    return st.session_state["_result_cache"]
 
 
 def _invalidate_result_caches() -> None:
     """Clear all filter, FFT, transform and quality caches (called on file change)."""
-    st.session_state.pop("_filter_cache", None)
-    st.session_state.pop("_fft_cache", None)
-    st.session_state.pop("_quality_cache", None)
-    st.session_state.pop("_transform_cache", None)
+    st.session_state.pop("_result_cache", None)
 
 
 def _apply_filter_cached(
@@ -626,29 +492,7 @@ def _apply_filter_cached(
     fill_stamp: bool,
 ) -> Optional[pd.Series]:
     """Apply filter with caching. Returns filtered series or None if filter fails."""
-    _init_result_caches()
-    cache_key = _get_filter_cache_key(column_name, file_sig, fspec, fs_value, fs_source, fill_stamp)
-    cached = _get_cached_filter(cache_key)
-    if cached is not None:
-        if cached.index.equals(series.index):
-            return cached
-        # Indici cambiati (es. decimazione performance): invalida e ricalcola
-        cache_store = st.session_state.get("_filter_cache")
-        if isinstance(cache_store, dict):
-            cache_store.pop(cache_key, None)
-        cached = None
-    if cached is not None:
-        return cached
-    # Cache miss: compute filter
-    try:
-        filtered, _ = apply_filter(series, x_series, fspec, fs_override=fs_value)
-        _cache_filter_result(cache_key, filtered)
-        return filtered
-    except Exception:
-        return None
-
-
-MAX_TRANSFORM_CACHE_SIZE = 32
+    return _result_cache().filter(series, x_series, fspec, fs_value, fs_source, file_sig, column_name, fill_stamp)
 
 
 def _apply_transform_pipeline_cached(
@@ -661,29 +505,7 @@ def _apply_transform_pipeline_cached(
     fill_stamp: bool,
 ) -> Tuple[pd.Series, Optional[pd.Series], List[str], bool]:
     """Apply transform pipeline with caching. Returns (y, x, descriptions, changed_length)."""
-    _init_result_caches()
-    specs_key = tuple(transform_spec_cache_key(s) for s in specs)
-    fs_val = fs_info.value if fs_info else None
-    fs_src = fs_info.source if fs_info else None
-    cache_key = (column_name, file_sig, specs_key, fs_val, fs_src, fill_stamp)
-
-    cache = st.session_state.setdefault("_transform_cache", {})
-    if cache_key in cache:
-        return cache[cache_key]
-
-    y_out, x_out, descs, changed = apply_transform_pipeline(
-        series, x_series, specs, fs_info, col_name=column_name
-    )
-    result: Tuple[pd.Series, Optional[pd.Series], List[str], bool] = (
-        y_out.copy(),
-        x_out.copy() if x_out is not None else None,
-        descs,
-        changed,
-    )
-    if len(cache) >= MAX_TRANSFORM_CACHE_SIZE:
-        cache.pop(next(iter(cache)))
-    cache[cache_key] = result
-    return result
+    return _result_cache().transform(series, x_series, specs, fs_info, file_sig, column_name, fill_stamp)
 
 
 def _compute_fft_cached(
@@ -698,21 +520,9 @@ def _compute_fft_cached(
     fspec: Optional[FilterSpec] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Compute FFT with caching. Returns (freqs, amp) arrays."""
-    from dataclasses import astuple
-    _init_result_caches()
-    # La firma del filtro entra nella chiave solo per lo spettro del segnale filtrato,
-    # così cambiando il filtro (es. MA 10 -> 1) la FFT del filtrato non resta in cache stale.
-    filter_sig = astuple(fspec) if (is_filtered and fspec is not None) else None
-    cache_key = _get_fft_cache_key(
-        column_name, file_sig, is_filtered, fftspec, fs_value, fs_source, fill_stamp, filter_sig
+    return _result_cache().fft(
+        series, fs_value, fs_source, fftspec, file_sig, column_name, is_filtered, fill_stamp, fspec
     )
-    cached = _get_cached_fft(cache_key)
-    if cached is not None:
-        return cached
-    # Cache miss: compute FFT
-    freqs, amp = compute_fft(series, fs_value, detrend=fftspec.detrend, window=fftspec.window)
-    _cache_fft_result(cache_key, freqs, amp)
-    return freqs, amp
 
 
 def _reset_all_settings() -> None:
@@ -903,51 +713,19 @@ def _cleaning_stats_table(report: CleaningReport) -> pd.DataFrame:
     )
 
 def _to_datetime_flexible(values: Any) -> pd.Series:
-    """
-    Converte in datetime riducendo i warning di inferenza formato.
+    """Converte in datetime riducendo i warning di inferenza formato (vedi core.engine)."""
+    return to_datetime_flexible(values)
 
-    Usa format=\"mixed\" se disponibile (pandas >=2.1) e ripiega su
-    to_datetime standard se non supportato.
-    """
-    try:
-        return pd.to_datetime(values, errors="coerce", format="mixed")  # type: ignore[arg-type]
-    except TypeError:
-        return pd.to_datetime(values, errors="coerce")  # type: ignore[arg-type]
 
 def _parse_x_column_once(df: pd.DataFrame, x_col: Optional[str]) -> Optional[pd.Series]:
     """
     FIX ISSUE #52: Pre-converti colonna X una volta sola prima del loop plot.
 
     Evita conversioni datetime/numeric ripetute per ogni colonna Y.
-    Su 100k righe × 5 cols: risparmio ~1 secondo (200ms × 5).
-
-    Args:
-        df: DataFrame contenente la colonna X
-        x_col: Nome della colonna X (o None)
-
-    Returns:
-        Serie X convertita (datetime/numeric) o None se non disponibile
     """
     if not x_col or x_col not in df.columns:
         return None
-
-    xraw = df[x_col]
-
-    # Se già datetime/timedelta, converti e ritorna
-    if pd.api.types.is_datetime64_any_dtype(xraw) or pd.api.types.is_timedelta64_dtype(xraw):
-        return _to_datetime_flexible(xraw)
-
-    # Prova coerzione numerica
-    xnum = pd.to_numeric(xraw, errors="coerce")
-    if xnum.notna().mean() >= 0.8:
-        return xnum
-
-    # Fallback: stringhe/datetime
-    try:
-        xdt = _to_datetime_flexible(xraw)
-        return xdt
-    except Exception:
-        return None
+    return parse_x(df[x_col])
 
 
 def _make_time_series(
@@ -957,42 +735,14 @@ def _make_time_series(
     x_parsed: Optional[pd.Series] = None
 ) -> Tuple[pd.Series, Optional[pd.Series]]:
     """
-    Estrae serie Y e X per plotting.
+    Estrae serie Y (numerica) e X per plotting.
 
     FIX ISSUE #52: Accetta x_parsed pre-processato per evitare conversioni ripetute.
-
-    Args:
-        df: DataFrame contenente i dati
-        x_col: Nome colonna X (per retrocompatibilità, ignorato se x_parsed è fornito)
-        y_col: Nome colonna Y
-        x_parsed: Serie X già convertita (opzionale, FIX #52)
-
-    Returns:
-        Tupla (y_series, x_series)
     """
-    y = pd.to_numeric(df[y_col], errors="coerce")
-    y.name = y_col
-
-    # FIX ISSUE #52: Se X già parsato, usa quello (evita ri-conversione)
+    y = numeric_series(df, y_col)
     if x_parsed is not None:
         return y, x_parsed
-
-    # Fallback legacy: converti X al volo (solo per retrocompatibilità)
-    if x_col and x_col in df.columns:
-        xraw = df[x_col]
-        if pd.api.types.is_datetime64_any_dtype(xraw) or pd.api.types.is_timedelta64_dtype(xraw):
-            return y, _to_datetime_flexible(xraw)
-        # prova coerzione numerica
-        xnum = pd.to_numeric(xraw, errors="coerce")
-        if xnum.notna().mean() >= 0.8:
-            return y, xnum
-        # fallback: stringhe/datetime
-        try:
-            xdt = _to_datetime_flexible(xraw)
-            return y, xdt
-        except Exception:
-            pass
-    return y, None
+    return y, _parse_x_column_once(df, x_col)
 
 
 def _mask_xy(y: pd.Series, x: Optional[pd.Series]) -> Tuple[pd.Series, Optional[pd.Series]]:
@@ -3452,6 +3202,7 @@ def _render_main_app():
                 st.caption("Prestazioni attive (LTTB): " + " · ".join(summaries))
 
         # FIX ISSUE #55: Log cache hit rate dopo plot
+        CACHE_STATS = _result_cache().stats
         filter_total = CACHE_STATS["filter_hits"] + CACHE_STATS["filter_misses"]
         fft_total = CACHE_STATS["fft_hits"] + CACHE_STATS["fft_misses"]
         if filter_total > 0 or fft_total > 0:
