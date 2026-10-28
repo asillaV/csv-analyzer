@@ -29,7 +29,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-LOADERS = ("reference", "new")
+LOADERS = ("reference", "new", "cache")
 
 
 # ---------------------------------------------------------------------------
@@ -94,6 +94,22 @@ def _measure(loader: str, path: Path) -> Dict[str, Any]:
                 return_details=True,
                 use_fast_ingest=False,
             )
+        elif loader == "cache":
+            # Conversione in una cache temporanea vuota, riapertura e lettura di 3 colonne.
+            from core import dataset_cache
+
+            with tempfile.TemporaryDirectory(prefix="bench_cache_") as cache_dir:
+                built = dataset_cache.open_dataset(path, directory=Path(cache_dir))
+                timings["build_s"] = time.perf_counter() - t0
+                timings["cache_mb"] = dataset_cache.cache_size(Path(cache_dir)) / 2**20
+                t1 = time.perf_counter()
+                reopened = dataset_cache.open_dataset(path, directory=Path(cache_dir))
+                timings["reopen_s"] = time.perf_counter() - t1
+                t2 = time.perf_counter()
+                subset = reopened.load(reopened.numeric_columns[:3])
+                timings["load3_s"] = time.perf_counter() - t2
+                df = subset
+                del built
         else:
             from core import ingest
 

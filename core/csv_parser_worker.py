@@ -31,7 +31,9 @@ if TYPE_CHECKING:  # solo per i type checker; non importato a runtime
     import multiprocessing as mp
 
 
-def _parsing_worker(result_queue: "mp.Queue", file_path: str, apply_cleaning: bool) -> None:
+def _parsing_worker(
+    result_queue: "mp.Queue", file_path: str, apply_cleaning: bool, content_key: str | None = None
+) -> None:
     """Analizza e carica il CSV nel processo figlio, restituendo l'esito via coda.
 
     Tutti gli import sono locali (vedi docstring del modulo): in questo modo
@@ -56,9 +58,14 @@ def _parsing_worker(result_queue: "mp.Queue", file_path: str, apply_cleaning: bo
             pass
 
         if use_optimized:
-            from core.loader_optimized import load_csv
-        else:
-            from core.loader import load_csv
+            # Cache Parquet: conversione una sola volta, riaperture immediate.
+            from core.dataset_cache import load_for_app
+
+            df, cleaning_report, meta = load_for_app(file_path, apply_cleaning, content_key)
+            result_queue.put(("ok", meta, df, cleaning_report))
+            return
+
+        from core.loader import load_csv
 
         meta = analyze_csv(file_path)
         df, cleaning_report = load_csv(

@@ -88,3 +88,5 @@ benchmark_ultra_fast.py
 test_config_loader.py
 test_correctness.py
 test_reset_functionality.md
+# ===== Cache Parquet dei CSV convertiti (core/dataset_cache.py) =====
+/cache/

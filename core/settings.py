@@ -52,6 +52,7 @@ DEFAULTS: Dict[str, Any] = {
         "rows_threshold": 100000,
         "chunk_size": 600000,
         "sample_size": 75000,
+        "cache_max_gb": 5,
         "advanced": {
             "use_pyarrow": True,
             "parallel_cleaning": True,

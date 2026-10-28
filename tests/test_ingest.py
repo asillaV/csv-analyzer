@@ -59,7 +59,7 @@ def test_nulls_do_not_corrupt_values(tmp_path):
 
 
 def test_to_float_array_keeps_mask():
-    arr = ingest._to_float_array(pa.chunked_array([pa.array([1.0, None, 3.0]), pa.array([None, 5.0])]))
+    arr = ingest.to_float_array(pa.chunked_array([pa.array([1.0, None, 3.0]), pa.array([None, 5.0])]))
     assert arr.tolist() == [1.0, pd.NA, 3.0, pd.NA, 5.0]
 
 

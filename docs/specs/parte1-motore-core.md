@@ -96,6 +96,26 @@ L'obiettivo "file reale 2,9 GB ≤ 45 s" si intende quindi come conversione in P
 - Limite di spazio configurabile (`performance.cache_max_gb`, default 5) con eliminazione LRU; pulsante "Svuota cache" nella scheda Impostazioni.
 - Invalidazione automatica su cambio di chiave; versione del formato da incrementare a ogni modifica di `ingest`.
 
+### Esito F2
+
+- `core/dataset_cache.py`: `open_dataset(path)` converte il CSV una sola volta in Parquet (zstd) in `user_data_dir()/cache/<chiave>/`, poi `CachedDataset.load(columns=[...])` legge solo le colonne richieste. `load()` senza argomenti è identico a `ingest.load()` (DataFrame e `CleaningReport`, verificato su corpus, CSV locali e fetta reale da 300 MB, anche con blocchi minuscoli).
+- Conversione in streaming a blocchi da 16 MB: le colonne che si convertono in modo pulito vanno in `main.parquet` blocco per blocco; quelle irregolari (migliaia, valute, testo, colonne vuote) vengono rilette da sole a fine passata e pulite con la logica storica (`extra.parquet`). Il formato numerico si stima sullo stesso campione del loader standard, accumulando i primi blocchi se servono.
+- Chiave: percorso + dimensione + data di modifica + hash di primi/ultimi 4 MB (oppure SHA-1 del contenuto per gli upload) + opzioni di pulizia + `INGEST_VERSION` + `CACHE_FORMAT`. Voci illeggibili o di versioni precedenti vengono rifatte; limite `performance.cache_max_gb` (5 GB, 2 per `config_web.json`) con eliminazione LRU.
+- App: `web_app._parse_csv_in_thread` e il worker in subprocess caricano tramite `dataset_cache.load_for_app` (chiave = SHA-1 dei byte caricati). Scheda Impostazioni: limite della cache, spazio in uso, pulsante "Svuota cache".
+- Riduzione della RAM durante la conversione: transcodifica in UTF-8 fatta da noi a pezzi (quella interna di pyarrow accumulava 1,3–1,9 GB sul file UTF-16), parser Arrow a thread singolo, allocatore di sistema invece di mimalloc, `release_unused()` dopo ogni blocco, righe MSVC salvate come maschere di bit.
+
+| File reale intero | Conversione | Picco RAM | Cache | Riapertura | 3 colonne |
+|---|---|---|---|---|---|
+| `ipraw25k` (299 MB, 1,34 M × 44) | 7,1 s | 683 MB | 13 MB | 0,01 s | 0,09 s |
+| `ipbase` (486 MB, 189 k × 307) | 8,1 s | 695 MB | 25 MB | 0,01 s | 0,04 s |
+| `iptpa` 20250921 (776 MB, 1,05 M × 122) | 13,9 s | 969 MB | 62 MB | 0,01 s | 0,09 s |
+| `iptpa` 20251126 (2,9 GB, 3,46 M × 132) | 33,4 s | 813 MB | 99 MB | 0,02 s | 0,22 s |
+
+Limiti noti:
+- l'app carica ancora **tutte** le colonne dopo la conversione (`load_for_app`): sul file da 2,9 GB il DataFrame completo (~4,1 GB) non entra in 8 GB di RAM. Serve che l'interfaccia carichi solo X e Y selezionate (F3/F5);
+- l'upload dal browser tiene ancora il file intero in RAM prima della conversione (F3);
+- le colonne irregolari vengono rilette tutte insieme: un file con moltissime colonne in formato con migliaia/valute ha un picco più alto.
+
 ### F3 — Apertura file da percorso locale (solo modalità desktop)
 - In modalità desktop (bundle PyInstaller o server su `localhost`) aggiungere "Apri file dal PC": il server è locale, quindi legge direttamente dal disco, senza upload, senza copia in RAM e senza file temporaneo.
 - Selezione con finestra di dialogo nativa (tkinter lanciato lato server) e lista dei file recenti.

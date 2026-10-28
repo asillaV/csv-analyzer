@@ -81,7 +81,7 @@ class IngestResult:
     engine: str = "arrow"
 
 
-class _FallbackToLegacy(Exception):
+class FallbackToLegacy(Exception):
     """Il file va letto con il loader standard."""
 
 
@@ -116,7 +116,7 @@ def load(
 
     try:
         return _load_arrow(path, meta, decimal, thousands, timings, progress_callback)
-    except _FallbackToLegacy as reason:
+    except FallbackToLegacy as reason:
         log.info("Ingest veloce non applicabile a %s (%s): uso il loader standard", path.name, reason)
         return _load_legacy(path, meta, apply_cleaning, decimal, thousands, timings)
 
@@ -139,24 +139,24 @@ def _load_arrow(
     t0 = time.perf_counter()
     _progress(progress_callback, "loading", 0, 1, "Lettura file...")
     try:
-        names = _column_names(path, encoding, delimiter, header, meta)
+        names = column_names(path, encoding, delimiter, header, meta)
         table, skipped = _read_strings(path, encoding, delimiter, header, len(names))
-    except (UnicodeDecodeError, _InvalidText):
+    except (UnicodeDecodeError, InvalidText):
         if encoding.lower().replace("-", "") not in ("utf8", "utf8sig"):
-            raise _FallbackToLegacy(f"decodifica fallita con {encoding}")
+            raise FallbackToLegacy(f"decodifica fallita con {encoding}")
         log.info("%s non è UTF-8 valido: rilettura con %s", path.name, FALLBACK_ENCODING)
         encoding = FALLBACK_ENCODING
         meta["encoding"] = encoding
-        names = _column_names(path, encoding, delimiter, header, meta)
+        names = column_names(path, encoding, delimiter, header, meta)
         table, skipped = _read_strings(path, encoding, delimiter, header, len(names))
     timings["read_s"] = time.perf_counter() - t0
 
     if skipped and skipped >= MAX_SKIPPED_ROWS_RATIO * (table.num_rows + skipped):
-        raise _FallbackToLegacy(f"{skipped} righe con troppi campi")
+        raise FallbackToLegacy(f"{skipped} righe con troppi campi")
 
     t1 = time.perf_counter()
     _progress(progress_callback, "cleaning", 0, len(names), "Conversione colonne...")
-    suggestion = _suggest_format(table, names, decimal, thousands)
+    suggestion = suggest_format(table, names, decimal, thousands)
     columns, report = _convert_columns(table, names, suggestion, progress_callback)
     timings["convert_s"] = time.perf_counter() - t1
 
@@ -174,11 +174,11 @@ def _load_arrow(
     return IngestResult(df=df, report=report, meta=meta, timings=timings, engine="arrow")
 
 
-class _InvalidText(Exception):
+class InvalidText(Exception):
     """Byte non validi per l'encoding dichiarato."""
 
 
-def _column_names(
+def column_names(
     path: Path, encoding: str, delimiter: str, header: Optional[int], meta: Dict[str, Any]
 ) -> List[str]:
     """Nomi colonna esattamente come li produrrebbe pandas (duplicati inclusi)."""
@@ -195,58 +195,96 @@ def _column_names(
     except UnicodeDecodeError:
         raise
     except Exception as exc:
-        raise _FallbackToLegacy(f"intestazione non leggibile: {exc}") from exc
+        raise FallbackToLegacy(f"intestazione non leggibile: {exc}") from exc
     return [str(c) for c in head.columns]
+
+
+class InvalidRowCounter:
+    """Handler Arrow per le righe malformate: le scarta e le conta come fa pandas."""
+
+    def __init__(self) -> None:
+        self.too_many = 0
+        self.too_few = 0
+
+    def __call__(self, row) -> str:
+        if row.actual_columns > row.expected_columns:
+            self.too_many += 1
+        else:
+            self.too_few += 1
+        return "skip"
+
+    def check(self) -> None:
+        if self.too_few:
+            raise FallbackToLegacy(f"{self.too_few} righe con meno campi dell'intestazione")
+
+
+def csv_options(
+    encoding: str,
+    delimiter: str,
+    header: Optional[int],
+    n_columns: int,
+    counter: InvalidRowCounter,
+    include: Optional[List[int]] = None,
+    block_size: Optional[int] = None,
+    use_threads: bool = True,
+) -> Dict[str, Any]:
+    """Opzioni pyarrow per leggere tutte le celle come stringhe originali.
+
+    `include`: posizioni delle colonne da materializzare (le altre vengono solo
+    tokenizzate). Le colonne interne si chiamano c0..cN.
+    """
+    if n_columns == 0:
+        raise FallbackToLegacy("nessuna colonna rilevata")
+    internal = [f"c{i}" for i in range(n_columns)]
+    convert = dict(
+        column_types={name: pa.string() for name in internal},
+        strings_can_be_null=False,
+        quoted_strings_can_be_null=False,
+    )
+    if include is not None:
+        convert["include_columns"] = [internal[i] for i in include]
+    return dict(
+        read_options=pacsv.ReadOptions(
+            encoding="utf8" if is_plain_utf8(encoding) else encoding,
+            skip_rows=0 if header is None else header + 1,
+            column_names=internal,
+            block_size=block_size or BLOCK_SIZE,
+            use_threads=use_threads,
+        ),
+        parse_options=pacsv.ParseOptions(delimiter=delimiter, invalid_row_handler=counter),
+        convert_options=pacsv.ConvertOptions(**convert),
+    )
+
+
+def is_plain_utf8(encoding: str) -> bool:
+    return encoding.lower().replace("-", "").replace("_", "") == "utf8"
+
+
+def arrow_errors(exc: Exception) -> Exception:
+    """Traduce gli errori Arrow in testo non valido (ritenta con cp1252) o ripiego."""
+    if isinstance(exc, UnicodeDecodeError):
+        return exc
+    text = str(exc).lower()
+    if "utf8" in text or "utf-8" in text:
+        return InvalidText(str(exc))
+    return FallbackToLegacy(f"parsing arrow: {exc}")
 
 
 def _read_strings(
     path: Path, encoding: str, delimiter: str, header: Optional[int], n_columns: int
 ) -> Tuple["pa.Table", int]:
     """Legge tutte le celle come stringhe; restituisce la tabella e le righe scartate."""
-    if n_columns == 0:
-        raise _FallbackToLegacy("nessuna colonna rilevata")
-    internal = [f"c{i}" for i in range(n_columns)]
-    skipped_too_many = 0
-    too_few = 0
-
-    def on_invalid_row(row) -> str:
-        nonlocal skipped_too_many, too_few
-        if row.actual_columns > row.expected_columns:
-            skipped_too_many += 1
-        else:
-            too_few += 1
-        return "skip"
-
-    norm = encoding.lower().replace("-", "").replace("_", "")
-    read_options = pacsv.ReadOptions(
-        encoding="utf8" if norm == "utf8" else encoding,
-        skip_rows=0 if header is None else header + 1,
-        column_names=internal,
-        block_size=BLOCK_SIZE,
-    )
-    parse_options = pacsv.ParseOptions(delimiter=delimiter, invalid_row_handler=on_invalid_row)
-    convert_options = pacsv.ConvertOptions(
-        column_types={name: pa.string() for name in internal},
-        strings_can_be_null=False,
-        quoted_strings_can_be_null=False,
-    )
+    counter = InvalidRowCounter()
+    options = csv_options(encoding, delimiter, header, n_columns, counter)
     try:
-        table = pacsv.read_csv(
-            str(path), read_options=read_options, parse_options=parse_options, convert_options=convert_options
-        )
-    except UnicodeDecodeError:
-        raise
-    except pa.ArrowInvalid as exc:
-        if "utf8" in str(exc).lower() or "utf-8" in str(exc).lower():
-            raise _InvalidText(str(exc)) from exc
-        raise _FallbackToLegacy(f"parsing arrow: {exc}") from exc
-
-    if too_few:
-        raise _FallbackToLegacy(f"{too_few} righe con meno campi dell'intestazione")
-    return table, skipped_too_many
+        table = pacsv.read_csv(str(path), **options)
+    except (UnicodeDecodeError, pa.ArrowInvalid) as exc:
+        raise arrow_errors(exc) from exc
+    counter.check()
+    return table, counter.too_many
 
 
-def _suggest_format(
+def suggest_format(
     table: "pa.Table", names: List[str], decimal: Optional[str], thousands: Optional[str]
 ) -> FormatSuggestion:
     """Stessa stima del loader standard: usa solo le prime righe di ogni colonna."""
@@ -267,12 +305,7 @@ def _convert_columns(
     numeric_columns: List[str] = []
     numeric_positions: List[int] = []
     all_nan: Optional[np.ndarray] = None
-    warnings: List[str] = []
-
-    if suggestion.sample_size == 0:
-        warnings.append("Impossibile stimare il formato: nessun valore numerico trovato nel campione.")
-    if suggestion.confidence < 0.25:
-        warnings.append(f"Bassa confidenza nel formato numerico stimato ({suggestion.confidence:.0%}).")
+    warnings = format_warnings(suggestion)
 
     # Le funzioni di pyarrow.compute rilasciano il GIL: le colonne si convertono in parallelo.
     workers = min(len(names), os.cpu_count() or 4, MAX_CONVERT_WORKERS)
@@ -305,18 +338,37 @@ def _convert_columns(
     return columns, report
 
 
-def _convert_column(
-    raw: "pa.ChunkedArray", suggestion: FormatSuggestion
-) -> Tuple[Optional[pd.arrays.FloatingArray], ColumnReport]:
-    total = len(raw)
+def format_warnings(suggestion: FormatSuggestion) -> List[str]:
+    """Avvisi sul formato numerico, come in csv_cleaner.clean_dataframe."""
+    warnings: List[str] = []
+    if suggestion.sample_size == 0:
+        warnings.append("Impossibile stimare il formato: nessun valore numerico trovato nel campione.")
+    if suggestion.confidence < 0.25:
+        warnings.append(f"Bassa confidenza nel formato numerico stimato ({suggestion.confidence:.0%}).")
+    return warnings
+
+
+@dataclass
+class FastCast:
+    """Esito della conversione vettoriale di una colonna (o di un blocco di righe)."""
+
+    numbers: Optional[Any]  # pa.Array/ChunkedArray float64, None se il cast fallisce o non ci sono valori
+    candidate_count: int  # celle non vuote dopo strip
+    msvc: Optional[Any]  # maschera booleana dei token MSVC, None se assenti
+
+
+def fast_cast(raw: Any, suggestion: FormatSuggestion) -> FastCast:
+    """Conversione Arrow a float64 con le regole del percorso veloce del loader storico.
+
+    Celle vuote e token MSVC diventano null, NaN diventa null. Se anche una sola
+    cella non è convertibile restituisce `numbers=None`: la colonna va trattata
+    con la logica storica (`clean_column`).
+    """
     stripped = pc.utf8_trim_whitespace(raw)
     non_empty = pc.not_equal(stripped, "")
     candidate_count = int(pc.sum(non_empty).as_py() or 0)
     if candidate_count == 0:
-        return None, ColumnReport(
-            total=total, candidate_numeric=0, converted=0, non_numeric=0,
-            conversion_rate=0.0, dtype="object", applied=False, examples_non_numeric=[],
-        )
+        return FastCast(None, 0, None)
 
     msvc = None
     if pc.any(pc.match_substring(stripped, "#")).as_py():
@@ -333,11 +385,20 @@ def _convert_column(
     try:
         numbers = pc.cast(candidate, pa.float64())
     except pa.ArrowInvalid:
-        return _convert_column_legacy(raw, stripped, msvc, suggestion)
-
+        return FastCast(None, candidate_count, msvc)
     numbers = pc.if_else(pc.is_nan(numbers), pa.scalar(None, pa.float64()), numbers)
-    values = _to_float_array(numbers)
-    return values, ColumnReport(
+    return FastCast(numbers, candidate_count, msvc)
+
+
+def empty_column_report(total: int) -> ColumnReport:
+    return ColumnReport(
+        total=total, candidate_numeric=0, converted=0, non_numeric=0,
+        conversion_rate=0.0, dtype="object", applied=False, examples_non_numeric=[],
+    )
+
+
+def fast_column_report(total: int, candidate_count: int) -> ColumnReport:
+    return ColumnReport(
         total=total,
         candidate_numeric=candidate_count,
         converted=candidate_count,
@@ -349,8 +410,20 @@ def _convert_column(
     )
 
 
-def _convert_column_legacy(
-    raw: "pa.ChunkedArray", stripped: "pa.ChunkedArray", msvc, suggestion: FormatSuggestion
+def _convert_column(
+    raw: "pa.ChunkedArray", suggestion: FormatSuggestion
+) -> Tuple[Optional[pd.arrays.FloatingArray], ColumnReport]:
+    total = len(raw)
+    cast = fast_cast(raw, suggestion)
+    if cast.candidate_count == 0:
+        return None, empty_column_report(total)
+    if cast.numbers is None:
+        return convert_column_legacy(raw, cast.msvc, suggestion)
+    return to_float_array(cast.numbers), fast_column_report(total, cast.candidate_count)
+
+
+def convert_column_legacy(
+    raw: Any, msvc: Optional[Any], suggestion: FormatSuggestion
 ) -> Tuple[Optional[pd.arrays.FloatingArray], ColumnReport]:
     """Colonne non convertibili in modo pulito: logica storica di csv_cleaner."""
     series = raw.to_pandas()
@@ -363,7 +436,7 @@ def _convert_column_legacy(
     return converted.array, column_report
 
 
-def _to_float_array(numbers: "pa.ChunkedArray") -> pd.arrays.FloatingArray:
+def to_float_array(numbers: "pa.ChunkedArray") -> pd.arrays.FloatingArray:
     combined = numbers.combine_chunks() if isinstance(numbers, pa.ChunkedArray) else numbers
     mask = np.array(combined.is_null().to_numpy(zero_copy_only=False), dtype=bool)
     # NB: niente fill_null(): con pyarrow 21 `fill_null(...).to_numpy()` restituisce

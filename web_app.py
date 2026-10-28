@@ -24,6 +24,7 @@ import streamlit as st
 
 from core.analyzer import analyze_csv
 from core.csv_cleaner import CleaningReport
+from core import dataset_cache
 from core.csv_parser_worker import _parsing_worker
 from core.paths import resource_path
 from core import settings as app_settings
@@ -192,6 +193,12 @@ def _parse_csv_in_thread(file_bytes: bytes, apply_cleaning: bool) -> Tuple[pd.Da
     try:
         with os.fdopen(fd, "wb") as tmp_file:
             tmp_file.write(file_bytes)
+        if LOADER_TYPE == "optimized":
+            # Cache Parquet indicizzata sul contenuto: riaprire lo stesso file
+            # (anche dopo un riavvio) salta del tutto la conversione.
+            return dataset_cache.load_for_app(
+                tmp_path, apply_cleaning, content_key=hashlib.sha1(file_bytes).hexdigest()
+            )
         meta = analyze_csv(str(tmp_path))
         df, cleaning_report = load_csv(
             str(tmp_path),
@@ -247,7 +254,7 @@ def _parse_csv_with_timeout(file_bytes: bytes, apply_cleaning: bool, timeout_s: 
 
         process = ctx.Process(
             target=_parsing_worker,
-            args=(result_queue, str(tmp_path), apply_cleaning),
+            args=(result_queue, str(tmp_path), apply_cleaning, hashlib.sha1(file_bytes).hexdigest()),
             daemon=True,
         )
         process.start()
@@ -1342,12 +1349,14 @@ _SETTINGS_SLIDER_RANGES = {
     "set_chunk_size": (50000, 2000000),
     "set_chunked_threshold_mb": (10, 1000),
     "set_max_cols": (10, 50000),
+    "set_cache_max_gb": (1, 100),
 }
 
 _SETTINGS_KEYS = (
     "set_max_file_mb", "set_max_rows_milioni", "set_max_cols", "set_timeout_s",
     "set_optimize_dtypes", "set_use_optimized_loader", "set_chunked_threshold_mb",
     "set_chunk_size", "set_use_pyarrow", "set_parallel_cleaning", "set_max_workers",
+    "set_cache_max_gb",
 )
 
 
@@ -1368,6 +1377,7 @@ def _settings_defaults_from_config(cfg: Dict[str, Any], cores: int) -> Dict[str,
         "set_use_pyarrow": bool(adv.get("use_pyarrow", True)),
         "set_parallel_cleaning": bool(adv.get("parallel_cleaning", True)),
         "set_max_workers": int(adv.get("max_workers") or cores),
+        "set_cache_max_gb": int(round(float(perf.get("cache_max_gb", dataset_cache.DEFAULT_MAX_GB)))),
     }
 
 
@@ -1512,6 +1522,29 @@ def _render_settings_panel() -> None:
         "hanno pieno effetto al riavvio dell'app."
     )
 
+    st.markdown("#### Cache dei file convertiti")
+    st.caption(
+        "Ogni CSV aperto viene convertito una sola volta in un formato compatto: "
+        "le aperture successive dello stesso file sono quasi istantanee."
+    )
+    kc1, kc2 = st.columns([3, 1])
+    with kc1:
+        st.slider(
+            "Spazio massimo su disco (GB)", min_value=1, max_value=100, step=1,
+            key="set_cache_max_gb",
+            help="Superato il limite vengono eliminati i file usati meno di recente.",
+        )
+    with kc2:
+        try:
+            used_mb = dataset_cache.cache_size() / 2**20
+        except OSError:
+            used_mb = 0.0
+        st.metric("In uso", f"{used_mb:,.0f} MB")
+        if st.button("Svuota cache", key="clear_cache_btn", use_container_width=True):
+            freed = dataset_cache.clear_cache()
+            _clear_cached_dataset()
+            st.success(f"Cache svuotata ({freed / 2**20:,.0f} MB liberati).")
+
     # --- Salva / Ripristina ---
     st.markdown("---")
     scol1, scol2 = st.columns(2)
@@ -1529,6 +1562,7 @@ def _render_settings_panel() -> None:
                     "use_optimized_loader": bool(st.session_state["set_use_optimized_loader"]),
                     "chunked_loading_threshold_mb": int(st.session_state["set_chunked_threshold_mb"]),
                     "chunk_size": int(st.session_state["set_chunk_size"]),
+                    "cache_max_gb": int(st.session_state["set_cache_max_gb"]),
                     "advanced": {
                         "use_pyarrow": bool(st.session_state["set_use_pyarrow"]),
                         "parallel_cleaning": bool(st.session_state["set_parallel_cleaning"]),

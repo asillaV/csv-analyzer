@@ -13,6 +13,7 @@
     "rows_threshold": 100000,
     "chunk_size": 50000,
     "sample_size": 30000,
+    "cache_max_gb": 2,
     "advanced": {
       "use_pyarrow": true,
       "parallel_cleaning": true,
